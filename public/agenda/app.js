@@ -168,13 +168,10 @@ function* candidates(startDate, days, maxWeeks) {
   }
 }
 
-async function hashPin(pin, salt) {
-  try {
-    const b = new TextEncoder().encode('kine:' + salt + ':' + pin);
-    const h = await crypto.subtle.digest('SHA-256', b);
-    return Array.from(new Uint8Array(h)).map(x => x.toString(16).padStart(2, '0')).join('');
-  } catch (e) { return 'plain:' + pin; }
-}
+// El ingreso es con DNI (texto plano). Se compara sin puntos ni espacios.
+const normDni = v => String(v || '').replace(/[^0-9a-z]/gi, '').toUpperCase();
+const DNI_OK = /^[0-9A-Z]{6,12}$/;
+const dniTaken = (dni, exceptId) => Object.entries(S.users).some(([id, u]) => id !== exceptId && normDni(u.dni) === dni);
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -268,18 +265,18 @@ function viewSetup() {
     <p class="lead">Primer ingreso: creá la cuenta de secretaría. Desde ahí vas a cargar a kinesiólogos y médicos y definir los días de atención.</p>
     <form id="sf" autocomplete="off">
       <label class="fld"><span>Tu nombre</span><input type="text" name="name" required></label>
-      <label class="fld"><span>PIN de acceso <small>(4 a 8 números)</small></span><input type="password" name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required></label>
+      <label class="fld"><span>Tu DNI <small>(lo vas a usar para ingresar)</small></span><input type="text" name="dni" inputmode="numeric" maxlength="15" required></label>
       <p class="err" id="ferr"></p>
       <button class="btn" type="submit">Crear y entrar</button>
     </form></section></main>`;
   $('#sf').onsubmit = async e => {
     e.preventDefault();
-    const f = e.target; const pin = f.pin.value.trim();
-    if (!/^[0-9]{4,8}$/.test(pin)) { $('#ferr').textContent = 'El PIN debe tener entre 4 y 8 números.'; return; }
+    const f = e.target; const dni = normDni(f.dni.value);
+    if (!DNI_OK.test(dni)) { $('#ferr').textContent = 'Revisá el DNI: tiene que tener entre 6 y 12 números.'; return; }
     const id = 'u' + uid();
     try {
       await Store.setCfg(Object.assign({}, DEFAULT_CFG));
-      const user = { name: f.name.value.trim(), title: '', role: 'secretaria', pin: await hashPin(pin, id), schedule: {} };
+      const user = { name: f.name.value.trim(), title: '', role: 'secretaria', dni, schedule: {} };
       await Store.setUser(id, user);
       S.users[id] = user; S.me = id; S.sig = '';
       try { sessionStorage.setItem('kine_me', id); } catch (er) {}
@@ -289,24 +286,49 @@ function viewSetup() {
 }
 
 function viewLogin() {
-  const list = Object.entries(S.users).sort((a, b) => (a[1].role === b[1].role ? byName(a, b) : a[1].role === 'secretaria' ? -1 : 1));
+  const withDni = Object.values(S.users).filter(u => normDni(u.dni));
+  if (!withDni.length) return viewClaimDni();
   app.innerHTML = `<main class="auth"><section class="panel">
     ${brandLogo()}
     <h1>${BRAND}</h1>
     <p class="lead">Agenda semanal de rehabilitación, kinesiología y consultorios.</p>
     ${Store.mode === 'local' ? '<p class="banner">Modo local: los datos se guardan solo en este navegador.</p>' : ''}
     <form id="lf" autocomplete="off">
-      <label class="fld"><span>Perfil</span><select name="u">${list.map(([id, u]) => `<option value="${id}">${esc(u.name)} (${ROLE_LABEL[u.role] || ''})</option>`).join('')}</select></label>
-      <label class="fld"><span>PIN</span><input type="password" name="pin" inputmode="numeric" maxlength="8" required></label>
+      <label class="fld"><span>DNI</span><input type="text" name="dni" inputmode="numeric" maxlength="15" required autofocus></label>
       <p class="err" id="ferr"></p>
       <button class="btn" type="submit">Ingresar</button>
     </form></section></main>`;
-  $('#lf').onsubmit = async e => {
+  $('#lf').onsubmit = e => {
     e.preventDefault();
-    const id = e.target.u.value; const u = S.users[id];
-    const h = await hashPin(e.target.pin.value.trim(), id);
-    if (u && u.pin === h) { S.me = id; S.sig = ''; try { sessionStorage.setItem('kine_me', id); } catch (er) {} render(); }
-    else { $('#ferr').textContent = 'PIN incorrecto.'; e.target.pin.value = ''; }
+    const dni = normDni(e.target.dni.value);
+    const found = dni ? Object.entries(S.users).filter(([, u]) => normDni(u.dni) === dni) : [];
+    if (found.length === 1) { S.me = found[0][0]; S.sig = ''; try { sessionStorage.setItem('kine_me', S.me); } catch (er) {} render(); }
+    else { $('#ferr').textContent = found.length ? 'Hay más de un perfil con ese DNI. Pedile a la secretaría que lo corrija.' : 'No hay ningún perfil con ese DNI.'; }
+  };
+}
+
+// Perfiles importados sin DNI: la secretaría elige su perfil y carga su DNI la primera vez.
+function viewClaimDni() {
+  const secs = Object.entries(S.users).filter(([, u]) => u.role === 'secretaria');
+  const list = (secs.length ? secs : Object.entries(S.users)).sort(byName);
+  app.innerHTML = `<main class="auth"><section class="panel">
+    ${brandLogo()}
+    <h1>${BRAND}</h1>
+    <p class="lead">Todavía ningún perfil tiene DNI cargado. Elegí tu perfil de secretaría y cargá tu DNI: desde ahí vas a poder cargar el DNI del resto del equipo en Equipo.</p>
+    <form id="cf" autocomplete="off">
+      <label class="fld"><span>Perfil</span><select name="u">${list.map(([id, u]) => `<option value="${id}">${esc(u.name)} (${ROLE_LABEL[u.role] || ''})</option>`).join('')}</select></label>
+      <label class="fld"><span>Tu DNI</span><input type="text" name="dni" inputmode="numeric" maxlength="15" required></label>
+      <p class="err" id="ferr"></p>
+      <button class="btn" type="submit">Guardar y entrar</button>
+    </form></section></main>`;
+  $('#cf').onsubmit = async e => {
+    e.preventDefault();
+    const id = e.target.u.value, u = S.users[id], dni = normDni(e.target.dni.value);
+    if (!u) return;
+    if (!DNI_OK.test(dni)) { $('#ferr').textContent = 'Revisá el DNI: tiene que tener entre 6 y 12 números.'; return; }
+    const nu = Object.assign({}, u, { dni });
+    try { await Store.setUser(id, nu); S.users[id] = nu; S.me = id; S.sig = ''; try { sessionStorage.setItem('kine_me', id); } catch (er) {} render(); }
+    catch (er) { $('#ferr').textContent = 'No se pudo guardar. Probá de nuevo.'; }
   };
 }
 
@@ -2203,7 +2225,7 @@ function userFormHTML(u, isNew, canRole) {
     ${canRole ? `<label class="fld"><span>Perfil</span><select name="role"><option value="kinesiologo"${role === 'kinesiologo' ? ' selected' : ''}>Kinesiólogo/a: solo su propia agenda</option><option value="medico"${role === 'medico' ? ' selected' : ''}>Médico/a: consultas de ${S.cfg.medMin} min, solo su agenda</option><option value="coordinador"${role === 'coordinador' ? ' selected' : ''}>Coordinador/a: publica noticias</option><option value="secretaria"${role === 'secretaria' ? ' selected' : ''}>Secretaría: todas las agendas</option></select></label>` : `<input type="hidden" name="role" value="${role}">`}
     <div class="fld" id="rolesBox" ${role === 'kinesiologo' ? '' : 'hidden'}><span>Roles <small>(uno o más)</small></span>
       <div class="rchips">${[...new Set([...(S.cfg.roles || []), ...(u.roles || [])])].map(r => `<label class="chip"><input type="checkbox" name="r" value="${esc(r)}" ${(u.roles || []).includes(r) ? 'checked' : ''}><span>${esc(r)}</span></label>`).join('')}</div></div>
-    <label class="fld"><span>${isNew ? 'PIN de acceso <small>(4 a 8 números)</small>' : 'Nuevo PIN <small>(vacío para mantener el actual)</small>'}</span><input type="password" name="pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" ${isNew ? 'required' : ''}></label>
+    <label class="fld"><span>DNI <small>(con este dato ingresa a la agenda)</small></span><input type="text" name="dni" inputmode="numeric" maxlength="15" required value="${esc(u.dni || '')}"></label>
     <div id="schedBox" ${isPro({ role }) ? '' : 'hidden'}>${schedHTML(u.schedule || {})}</div>
     <p class="err" id="ferr"></p>
     <div class="actions" id="uactions"></div>
@@ -2239,14 +2261,15 @@ function bindUserForm(id, isNew, opts) {
     e.preventDefault();
     const err = $('#ferr'); err.textContent = '';
     if (!(isSec() || id === S.me)) { err.textContent = 'No tenés permiso para editar este perfil.'; return; }
-    const pin = f.pin.value.trim();
-    if (pin && !/^[0-9]{4,8}$/.test(pin)) { err.textContent = 'El PIN debe tener entre 4 y 8 números.'; return; }
+    const dni = normDni(f.dni.value);
+    if (!DNI_OK.test(dni)) { err.textContent = 'Revisá el DNI: tiene que tener entre 6 y 12 números.'; return; }
+    if (dniTaken(dni, id)) { err.textContent = 'Ese DNI ya está cargado en otro perfil.'; return; }
     const role = f.role.value;
     if (!isSec() && role !== u.role) { err.textContent = 'No podés cambiar tu perfil.'; return; }
     let schedule = u.schedule || {};
     try { if (isPro({ role })) schedule = readSchedule(f); } catch (er) { err.textContent = er.message; return; }
     const roles = role === 'kinesiologo' ? [...f.querySelectorAll('input[name=r]:checked')].map(x => x.value) : [];
-    const data = { name: f.name.value.trim(), title: f.title.value.trim(), role, roles, schedule, photo: photoState, pin: pin ? await hashPin(pin, id) : u.pin };
+    const data = { name: f.name.value.trim(), title: f.title.value.trim(), role, roles, schedule, photo: photoState, dni };
     try { await Store.setUser(id, data); toast(isNew ? 'Perfil creado' : 'Cambios guardados'); opts.onDone && opts.onDone(); }
     catch (er) { err.textContent = 'No se pudo guardar. Revisá tu permiso de edición sobre esta página.'; }
   };
@@ -2256,7 +2279,7 @@ function viewTeam() {
   const list = Object.entries(S.users).sort((a, b) => (a[1].role === b[1].role ? byName(a, b) : a[1].role === 'secretaria' ? -1 : 1));
   $('#view').innerHTML = `<section class="panel">
     <div class="head-row"><h2>Equipo</h2><button class="btn" id="addu">Agregar integrante</button></div>
-    <p class="hint">Cada kinesiólogo y cada médico entra con su PIN y ve solamente su agenda. La secretaría ve y edita las agendas de todos.</p>
+    <p class="hint">Cada kinesiólogo y cada médico entra con su DNI y ve solamente su agenda. La secretaría ve y edita las agendas de todos.</p>
     ${list.map(([id, u]) => `<div class="person"><div style="display:flex;gap:12px;align-items:center">${avatarHTML(u, 46)}<div><h3>${esc(u.name)}<span class="badge ${u.role === 'secretaria' ? 'sec' : u.role === 'medico' ? 'med' : ''}">${ROLE_LABEL[u.role] || ''}</span></h3>
       ${u.title ? `<p>${esc(u.title)}</p>` : ''}${(u.roles || []).length ? `<p>Roles: ${esc(u.roles.join(', '))}</p>` : ''}<p>${esc(schedSummary(u))}</p></div></div>
       <button class="btn ghost small" data-edit="${id}">Editar</button></div>`).join('')}

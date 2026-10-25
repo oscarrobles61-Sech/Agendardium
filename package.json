@@ -9,7 +9,8 @@
     "start": "next start",
     "db:migrate": "node --env-file-if-exists=.env.local --env-file-if-exists=.env scripts/migrate.mjs",
     "db:migrate:new": "prisma migrate dev",
-    "db:status": "prisma migrate status"
+    "db:status": "prisma migrate status",
+    "db:import": "node scripts/import.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",
