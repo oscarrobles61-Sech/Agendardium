@@ -1,11 +1,12 @@
-// Esquema de la base de la agenda. Las migraciones viven en prisma/migrations.
+// Esquema de la base de la agenda. Generado con `prisma db pull` a partir de las migraciones de prisma/migrations.
+// Las migraciones (SQL) son la fuente de verdad: incluyen CHECKs e índices que Prisma no modela.
 // La app lee y escribe con @neondatabase/serverless; Prisma se usa solo para migrar.
 
 datasource db {
   provider = "postgresql"
 }
 
-// Cada documento de la agenda (config, users, agenda, patients, billing, news, backups, backupidx, meta).
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
 model Doc {
   col       String
   id        String
@@ -16,10 +17,283 @@ model Doc {
   @@map("docs")
 }
 
-// Contador de cambios por colección: el navegador lo consulta para saber cuándo refrescar.
 model DocVersion {
   col String @id
   v   BigInt @default(0)
 
   @@map("doc_versions")
+}
+
+model agenda_blocks {
+  row_id          BigInt       @id @default(autoincrement())
+  id              String?
+  week            DateTime     @db.Date
+  professional_id String
+  group_id        String?
+  date            DateTime?    @db.Date
+  from_hour       Int?         @db.SmallInt
+  to_hour         Int?         @db.SmallInt
+  reason          String?
+  created_by      String?
+  created_by_name String?
+  created_at      DateTime?    @db.Timestamptz(3)
+  pos             Int          @default(0) @db.SmallInt
+  extra           Json         @default("{}")
+  agenda_weeks    agenda_weeks @relation(fields: [week, professional_id], references: [week, professional_id], onDelete: Cascade, map: "agenda_blocks_week_fkey")
+
+  @@index([professional_id, date], map: "agenda_blocks_idx")
+}
+
+model agenda_weeks {
+  week            DateTime        @db.Date
+  professional_id String
+  extra           Json            @default("{}")
+  agenda_blocks   agenda_blocks[]
+  sessions        sessions[]
+
+  @@id([week, professional_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model app_config {
+  id                    Int      @id @default(1) @db.SmallInt
+  center_name           String?
+  open_hour             Int?     @db.SmallInt
+  close_hour            Int?     @db.SmallInt
+  capacity_per_hour     Int?     @db.SmallInt
+  work_days             Int[]    @db.SmallInt
+  med_minutes           Int?     @db.SmallInt
+  max_overbooks         Int?     @db.SmallInt
+  max_recoveries        Int?     @db.SmallInt
+  end_reminder_sessions Int?     @db.SmallInt
+  kine_roles            String[]
+  category_prices       Json?
+  holidays_auto         Boolean?
+  nolab_closes_center   Boolean?
+  extra                 Json     @default("{}")
+}
+
+model billing_months {
+  professional_id  String
+  month            String             @db.Char(7)
+  note             String?
+  percent          Decimal?           @db.Decimal
+  billed_total     Decimal?           @db.Decimal
+  paid_total       Decimal?           @db.Decimal
+  category_prices  Json?
+  updated_at       DateTime?          @db.Timestamptz(3)
+  extra            Json               @default("{}")
+  billing_patients billing_patients[]
+
+  @@id([professional_id, month])
+}
+
+model billing_patients {
+  professional_id String
+  month           String         @db.Char(7)
+  patient_id      String
+  category        Int?           @db.SmallInt
+  has_amounts     Boolean        @default(false)
+  billed          Decimal?       @db.Decimal
+  paid            Decimal?       @db.Decimal
+  pos             Int            @default(0) @db.SmallInt
+  extra           Json           @default("{}")
+  billing_months  billing_months @relation(fields: [professional_id, month], references: [professional_id, month], onDelete: Cascade, map: "billing_patients_month_fkey")
+
+  @@id([professional_id, month, patient_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model holidays {
+  id        Int           @id @default(autoincrement())
+  date      DateTime?     @db.Date
+  month_day String?       @db.Char(5)
+  name      String?
+  type      holiday_type?
+  closed    Boolean?
+  removed   Boolean?
+  yearly    Boolean       @default(false)
+  from_year Int?          @db.SmallInt
+  extra     Json          @default("{}")
+}
+
+model news {
+  id          String    @id
+  title       String?
+  text        String?
+  audience    Json?
+  from_date   DateTime? @db.Date
+  to_date     DateTime? @db.Date
+  pinned      Boolean?
+  author_id   String?
+  author_name String?
+  author_role String?
+  created_at  DateTime? @db.Timestamptz(3)
+  updated_at  DateTime? @db.Timestamptz(3)
+  extra       Json      @default("{}")
+}
+
+model patient_notes {
+  id             String
+  patient_id     String
+  author_id      String?
+  author_name    String?
+  text           String?
+  session_date   DateTime? @db.Date
+  session_number Int?      @db.SmallInt
+  created_at     DateTime? @db.Timestamptz(3)
+  pos            Int       @default(0) @db.SmallInt
+  extra          Json      @default("{}")
+  patients       patients  @relation(fields: [patient_id], references: [id], onDelete: Cascade)
+
+  @@id([patient_id, id])
+}
+
+model patient_professionals {
+  patient_id String
+  user_id    String
+  pos        Int      @default(0) @db.SmallInt
+  patients   patients @relation(fields: [patient_id], references: [id], onDelete: Cascade)
+
+  @@id([patient_id, user_id])
+}
+
+model patients {
+  id                    String                  @id
+  name                  String?
+  dni                   String?
+  phone                 String?
+  insurance             String?
+  affiliate_no          String?
+  pay_category          Int?                    @db.SmallInt
+  notes                 String?
+  created_at            DateTime?               @db.Timestamptz(3)
+  updated_at            DateTime?               @db.Timestamptz(3)
+  extra                 Json                    @default("{}")
+  patient_notes         patient_notes[]
+  patient_professionals patient_professionals[]
+  treatment_plans       treatment_plans[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model plan_day_patterns {
+  plan_id         String
+  weekday         Int             @db.SmallInt
+  hour            Int?            @db.SmallInt
+  minute          Int?            @db.SmallInt
+  extra           Json            @default("{}")
+  treatment_plans treatment_plans @relation(fields: [plan_id], references: [id], onDelete: Cascade)
+
+  @@id([plan_id, weekday])
+}
+
+model sessions {
+  row_id             BigInt          @id @default(autoincrement())
+  id                 String?
+  week               DateTime        @db.Date
+  professional_id    String
+  date               DateTime        @db.Date
+  hour               Int             @db.SmallInt
+  minute             Int?            @db.SmallInt
+  slot_pos           Int             @default(0) @db.SmallInt
+  patient_id         String?
+  plan_id            String?
+  series_id          String?
+  patient_name       String?
+  phone              String?
+  note               String?
+  session_number     Int?            @db.SmallInt
+  status             session_status?
+  is_recovery        Boolean?
+  recovery_from_date DateTime?       @db.Date
+  recovery_to        String?
+  is_overbook        Boolean?
+  cancel_reason      String?
+  cancel_group_id    String?
+  created_by         String?
+  extra              Json            @default("{}")
+  agenda_weeks       agenda_weeks    @relation(fields: [week, professional_id], references: [week, professional_id], onDelete: Cascade, map: "sessions_week_fkey")
+
+  @@index([professional_id, date, hour], map: "sessions_agenda_idx")
+  @@index([patient_id], map: "sessions_patient_idx")
+  @@index([plan_id], map: "sessions_plan_idx")
+  @@index([week, professional_id], map: "sessions_week_idx")
+}
+
+model treatment_plans {
+  id                String              @id
+  patient_id        String
+  professional_id   String?
+  total_sessions    Int?                @db.SmallInt
+  placed_sessions   Int?                @db.SmallInt
+  recoveries_used   Int?                @db.SmallInt
+  diagnosis         String?
+  start_date        DateTime?           @db.Date
+  last_date         DateTime?           @db.Date
+  status            plan_status?
+  bill_month        String?             @db.Char(7)
+  end_note          String?
+  ended_at          DateTime?           @db.Timestamptz(3)
+  created_at        DateTime?           @db.Timestamptz(3)
+  pos               Int                 @default(0) @db.SmallInt
+  extra             Json                @default("{}")
+  plan_day_patterns plan_day_patterns[]
+  patients          patients            @relation(fields: [patient_id], references: [id], onDelete: Cascade)
+
+  @@index([patient_id], map: "treatment_plans_patient_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model user_schedules {
+  user_id   String
+  weekday   Int      @db.SmallInt
+  works     Boolean?
+  from_hour Int?     @db.SmallInt
+  to_hour   Int?     @db.SmallInt
+  extra     Json     @default("{}")
+  users     users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, weekday])
+}
+
+model users {
+  id             String           @id
+  name           String?
+  dni            String?
+  title          String?
+  role           user_role?
+  kine_roles     String[]
+  photo          String?
+  active         Boolean          @default(true)
+  extra          Json             @default("{}")
+  user_schedules user_schedules[]
+
+  @@index([dni])
+}
+
+enum holiday_type {
+  nacional
+  provincial
+  festivo
+  nolab
+}
+
+enum plan_status {
+  activo
+  finalizado
+}
+
+enum session_status {
+  prog
+  asist
+  falto
+  rec_done @map("rec-done")
+  cancel
+}
+
+enum user_role {
+  secretaria
+  kinesiologo
+  medico
+  coordinador
 }

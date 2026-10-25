@@ -6,13 +6,31 @@ pacientes, registro/facturación, equipo, noticias del día y copias de segurida
 
 ## Cómo está armada
 
-- `public/agenda/app.js` y `app/agenda.css`: la aplicación original, sin cambios de comportamiento ni de diseño.
+- `public/agenda/app.js` y `app/agenda.css`: la aplicación original, con el mismo diseño y las mismas reglas.
+  Lo único distinto es el ingreso: cada persona entra con su **DNI** (ver "Ingreso con DNI").
 - `public/agenda/neon-db.js`: cliente que reemplaza la base del HTML original y habla con las rutas `/api/db/*`.
   Revisa cambios cada 2,5 s, así que lo que carga una persona aparece solo en las pantallas de las demás.
 - `app/api/db/*`: rutas de Next.js que leen y escriben en Neon (`DATABASE_URL`).
-- `prisma/`: esquema y migraciones de la base con **Prisma** (tablas `docs`, con cada documento en JSONB,
-  y `doc_versions`, para detectar cambios). Prisma se usa solo para migrar; la app consulta con el driver de Neon.
-- `proxy.ts`: contraseña opcional para todo el sitio (ver más abajo).
+- `lib/docmap.ts` y `lib/store.ts`: traducen lo que guarda la app a **tablas relacionales** y de vuelta.
+- `prisma/`: esquema y migraciones de la base con **Prisma**. Prisma se usa solo para migrar; la app consulta con el driver de Neon.
+
+### Tablas
+
+Basadas en el `schema.sql` de referencia:
+
+| Tabla | Contenido |
+|---|---|
+| `app_config`, `holidays` | Configuración general y feriados cargados a mano |
+| `users`, `user_schedules` | Perfiles (con su `dni` en texto plano) y horario por día |
+| `patients`, `patient_professionals`, `patient_notes` | Pacientes, sus profesionales y notas tipo historia clínica |
+| `treatment_plans`, `plan_day_patterns` | Tratamientos y su patrón de días/horas |
+| `agenda_weeks`, `sessions`, `agenda_blocks` | Semanas de agenda por profesional, cada turno y los bloqueos de "Cancelar agenda" |
+| `billing_months`, `billing_patients` | Registro mensual de facturado y liquidado |
+| `news` | Noticias de Inicio |
+| `docs`, `doc_versions` | Copias de seguridad automáticas y el contador de cambios para refrescar pantallas |
+
+Cada tabla tiene una columna `extra` (jsonb) donde va cualquier dato de la app que no tenga columna propia,
+para que nada se pierda. No hay contraseñas ni hashes guardados.
 
 Si `DATABASE_URL` no está definida, la agenda funciona en **modo local** (datos solo en ese navegador), igual que el HTML original.
 
@@ -28,9 +46,8 @@ Si `DATABASE_URL` no está definida, la agenda funciona en **modo local** (datos
 2. Antes de **Deploy**, en **Environment Variables** agregá:
    - `DATABASE_URL` = la cadena *pooled* de Neon.
    - `DATABASE_URL_UNPOOLED` = la cadena directa (opcional; si no está, las migraciones usan `DATABASE_URL`).
-   - Recomendado: `BASIC_AUTH_USER` y `BASIC_AUTH_PASSWORD` (ver "Seguridad").
 3. Tocá **Deploy**. Cada build corre `prisma migrate deploy` antes de `next build` (script `vercel-build`),
-   así que la base queda siempre al día con las migraciones del repo. Al abrir la URL, la primera pantalla pide crear la cuenta de secretaría.
+   así que la base queda siempre al día con las migraciones del repo. Si la base está vacía, la primera pantalla pide crear la cuenta de secretaría (nombre y DNI).
 
 > Alternativa: en Vercel → tu proyecto → **Storage** → **Neon** podés crear la base desde Vercel; ahí `DATABASE_URL` se carga sola.
 
@@ -53,16 +70,22 @@ npm run dev                  # http://localhost:3000
 - Subí esa carpeta al repo: el próximo deploy de Vercel la aplica en producción.
 - `npm run db:status` muestra qué migraciones faltan aplicar.
 
-## Seguridad
+## Ingreso con DNI
 
-La agenda guarda datos de pacientes. Igual que en el HTML original, cada perfil entra con su PIN, pero la API no
-distingue usuarios: cualquiera que conozca la URL podría consultarla. Por eso conviene activar una de estas dos opciones:
+- Cada perfil entra escribiendo su DNI (se guarda en texto plano en `users.dni` y se compara sin puntos ni espacios).
+- La secretaría carga o cambia el DNI de cada integrante en **Equipo**. No se permiten dos perfiles con el mismo DNI.
+- Si hay perfiles pero ninguno tiene DNI (por ejemplo, después de importar datos), la pantalla de ingreso pide
+  elegir el perfil de secretaría y cargar su DNI. Desde ahí se cargan los del resto.
+- También se puede cargar a mano en Neon → SQL Editor: `UPDATE users SET dni = '12345678' WHERE name = 'Pamela';`
 
-- **Usuario y contraseña del sitio**: definí `BASIC_AUTH_USER` y `BASIC_AUTH_PASSWORD` en Vercel. El navegador los pide una vez y después se entra con el PIN de siempre.
-- **Vercel Deployment Protection** (Settings → Deployment Protection), si el equipo tiene cuentas de Vercel.
+> El sitio no tiene contraseña ni usuario aparte: cualquiera que conozca la URL puede usar la API y ver los datos,
+> incluidos los DNI. Si más adelante se quiere cerrar, Vercel tiene **Deployment Protection** (Settings → Deployment Protection).
 
-## Pasar datos desde el HTML original
+## Importar datos
 
-En el HTML original, en **Ajustes → Copias de seguridad → Descargar copia actual**, bajá el archivo `.json`.
-En la app nueva, creá la cuenta de secretaría, andá a **Ajustes → Copias de seguridad → Restaurar desde archivo** y elegí ese archivo.
-Se reemplazan los datos (perfiles, pacientes, agenda, facturación y noticias) por los de la copia; los PIN siguen siendo los mismos.
+`datos-agenda.json` (export de la agenda HTML) **no** está en el repo porque tiene datos personales. Dos formas de cargarlo:
+
+- **Desde Neon**: pegá el archivo `importar-datos.sql` en Neon → SQL Editor y tocá **Run** (después del primer deploy, que crea las tablas). No pisa nada que ya exista.
+- **Por la API**: `npm run db:import -- ruta/a/datos-agenda.json https://tu-agenda.vercel.app`. También acepta una copia descargada desde Ajustes.
+
+Después de importar, cargá los DNI (ver arriba).
