@@ -10,8 +10,8 @@ pacientes, registro/facturación, equipo, noticias del día y copias de segurida
 - `public/agenda/neon-db.js`: cliente que reemplaza la base del HTML original y habla con las rutas `/api/db/*`.
   Revisa cambios cada 2,5 s, así que lo que carga una persona aparece solo en las pantallas de las demás.
 - `app/api/db/*`: rutas de Next.js que leen y escriben en Neon (`DATABASE_URL`).
-- `db/schema.sql`: dos tablas (`docs` con cada documento en JSONB y `doc_versions` para detectar cambios).
-  La app las crea sola la primera vez que se conecta.
+- `prisma/`: esquema y migraciones de la base con **Prisma** (tablas `docs`, con cada documento en JSONB,
+  y `doc_versions`, para detectar cambios). Prisma se usa solo para migrar; la app consulta con el driver de Neon.
 - `proxy.ts`: contraseña opcional para todo el sitio (ver más abajo).
 
 Si `DATABASE_URL` no está definida, la agenda funciona en **modo local** (datos solo en ese navegador), igual que el HTML original.
@@ -21,26 +21,37 @@ Si `DATABASE_URL` no está definida, la agenda funciona en **modo local** (datos
 ### 1. Crear la base en Neon
 1. Entrá a <https://console.neon.tech> y creá un proyecto (región sugerida: la más cercana a tus usuarios, p. ej. São Paulo).
 2. En el panel del proyecto tocá **Connect**, elegí **Pooled connection** y copiá la cadena que empieza con `postgresql://…`.
-3. (Opcional) Para crear las tablas a mano: abrí el **SQL Editor** y pegá el contenido de `db/schema.sql`. Si no, se crean solas.
+3. Copiá también la conexión directa (con **Pooled connection** apagado, sin `-pooler` en el host): es la que conviene usar para migrar.
 
 ### 2. Publicar en Vercel
 1. Entrá a <https://vercel.com/new>, importá el repo `oscarrobles61-Sech/Agendardium` (framework: Next.js, sin cambiar nada más).
 2. Antes de **Deploy**, en **Environment Variables** agregá:
-   - `DATABASE_URL` = la cadena de Neon del paso anterior.
+   - `DATABASE_URL` = la cadena *pooled* de Neon.
+   - `DATABASE_URL_UNPOOLED` = la cadena directa (opcional; si no está, las migraciones usan `DATABASE_URL`).
    - Recomendado: `BASIC_AUTH_USER` y `BASIC_AUTH_PASSWORD` (ver "Seguridad").
-3. Tocá **Deploy**. Al abrir la URL, la primera pantalla pide crear la cuenta de secretaría.
+3. Tocá **Deploy**. Cada build corre `prisma migrate deploy` antes de `next build` (script `vercel-build`),
+   así que la base queda siempre al día con las migraciones del repo. Al abrir la URL, la primera pantalla pide crear la cuenta de secretaría.
 
 > Alternativa: en Vercel → tu proyecto → **Storage** → **Neon** podés crear la base desde Vercel; ahí `DATABASE_URL` se carga sola.
 
 Si cambiás una variable de entorno después, hacé **Redeploy** para que se aplique.
 
+> Si la base ya tenía las tablas porque la abriste con una versión anterior de la app, la primera migración
+> la "adopta" sola (ver `scripts/migrate.mjs`): no se pierde ningún dato.
+
 ### 3. Desarrollo local
 ```bash
 cp .env.example .env.local   # completá DATABASE_URL
 npm install
-npm run db:setup             # opcional, crea las tablas
+npm run db:migrate           # aplica las migraciones de prisma/migrations
 npm run dev                  # http://localhost:3000
 ```
+
+### Migraciones con Prisma
+- Cambiá `prisma/schema.prisma` y corré `npm run db:migrate:new -- --name descripcion` contra una base de
+  desarrollo (por ejemplo una *branch* de Neon). Eso genera una carpeta nueva en `prisma/migrations`.
+- Subí esa carpeta al repo: el próximo deploy de Vercel la aplica en producción.
+- `npm run db:status` muestra qué migraciones faltan aplicar.
 
 ## Seguridad
 

@@ -6,7 +6,6 @@ export const COLLECTIONS = new Set([
 ]);
 
 let client: NeonQueryFunction<false, false> | null = null;
-let schemaReady: Promise<void> | null = null;
 
 export const hasDb = () => !!process.env.DATABASE_URL;
 
@@ -14,25 +13,6 @@ export function sql() {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL no está configurada');
   if (!client) client = neon(process.env.DATABASE_URL);
   return client;
-}
-
-// Crea las tablas la primera vez (idempotente). También se puede correr `npm run db:setup`.
-export function ensureSchema() {
-  if (!schemaReady) {
-    const q = sql();
-    schemaReady = (async () => {
-      await q`CREATE TABLE IF NOT EXISTS docs (
-        col text NOT NULL,
-        id text NOT NULL,
-        data jsonb NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT now(),
-        PRIMARY KEY (col, id)
-      )`;
-      await q`CREATE INDEX IF NOT EXISTS docs_agenda_week ON docs ((data->>'week')) WHERE col = 'agenda'`;
-      await q`CREATE TABLE IF NOT EXISTS doc_versions (col text PRIMARY KEY, v bigint NOT NULL DEFAULT 0)`;
-    })().catch(e => { schemaReady = null; throw e; });
-  }
-  return schemaReady;
 }
 
 export class BadRequest extends Error {}

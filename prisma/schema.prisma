@@ -1,0 +1,25 @@
+// Esquema de la base de la agenda. Las migraciones viven en prisma/migrations.
+// La app lee y escribe con @neondatabase/serverless; Prisma se usa solo para migrar.
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Cada documento de la agenda (config, users, agenda, patients, billing, news, backups, backupidx, meta).
+model Doc {
+  col       String
+  id        String
+  data      Json
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@id([col, id])
+  @@map("docs")
+}
+
+// Contador de cambios por colección: el navegador lo consulta para saber cuándo refrescar.
+model DocVersion {
+  col String @id
+  v   BigInt @default(0)
+
+  @@map("doc_versions")
+}
