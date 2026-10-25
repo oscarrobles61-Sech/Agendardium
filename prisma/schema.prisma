@@ -221,24 +221,27 @@ model sessions {
 }
 
 model treatment_plans {
-  id                String              @id
-  patient_id        String
-  professional_id   String?
-  total_sessions    Int?                @db.SmallInt
-  placed_sessions   Int?                @db.SmallInt
-  recoveries_used   Int?                @db.SmallInt
-  diagnosis         String?
-  start_date        DateTime?           @db.Date
-  last_date         DateTime?           @db.Date
-  status            plan_status?
-  bill_month        String?             @db.Char(7)
-  end_note          String?
-  ended_at          DateTime?           @db.Timestamptz(3)
-  created_at        DateTime?           @db.Timestamptz(3)
-  pos               Int                 @default(0) @db.SmallInt
-  extra             Json                @default("{}")
-  plan_day_patterns plan_day_patterns[]
-  patients          patients            @relation(fields: [patient_id], references: [id], onDelete: Cascade)
+  id                 String              @id
+  patient_id         String
+  professional_id    String?
+  total_sessions     Int?                @db.SmallInt
+  placed_sessions    Int?                @db.SmallInt
+  recoveries_used    Int?                @db.SmallInt
+  diagnosis          String?
+  start_date         DateTime?           @db.Date
+  last_date          DateTime?           @db.Date
+  status             plan_status?
+  bill_month         String?             @db.Char(7)
+  end_note           String?
+  ended_at           DateTime?           @db.Timestamptz(3)
+  created_at         DateTime?           @db.Timestamptz(3)
+  pos                Int                 @default(0) @db.SmallInt
+  extra              Json                @default("{}")
+  session_type       String?
+  training_frequency String?
+  practice           String?
+  plan_day_patterns  plan_day_patterns[]
+  patients           patients            @relation(fields: [patient_id], references: [id], onDelete: Cascade)
 
   @@index([patient_id], map: "treatment_plans_patient_idx")
 }
@@ -266,6 +269,7 @@ model users {
   photo          String?
   active         Boolean          @default(true)
   extra          Json             @default("{}")
+  profiles       user_role[]
   user_schedules user_schedules[]
 
   @@index([dni])
@@ -296,4 +300,8 @@ enum user_role {
   kinesiologo
   medico
   coordinador
+  administrador
+  profesor_ef
+  fonoaudiologo
+  terapista_ocupacional
 }

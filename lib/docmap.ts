@@ -12,7 +12,8 @@ type Obj = Record<string, unknown>;
 
 type Kind =
   | 'text' | 'int' | 'num' | 'bool' | 'date' | 'ym' | 'ms' | 'json' | 'textarr' | 'intarr'
-  | readonly string[]; // enum
+  | readonly string[]                // enum
+  | { readonly arrayOf: readonly string[] }; // lista de valores de un enum
 
 // [clave en el documento, columna, tipo]
 type Field = readonly [string, string, Kind];
@@ -25,6 +26,7 @@ const isSmall = (v: unknown) => Number.isInteger(v) && Math.abs(v as number) <= 
 
 function fits(kind: Kind, v: unknown): boolean {
   if (Array.isArray(kind)) return typeof v === 'string' && kind.includes(v);
+  if (typeof kind === 'object' && 'arrayOf' in kind) return Array.isArray(v) && v.every(x => typeof x === 'string' && kind.arrayOf.includes(x));
   switch (kind) {
     case 'text': return typeof v === 'string';
     case 'int': return isSmall(v);
@@ -66,7 +68,13 @@ function join(row: Row, fields: readonly Field[]): Obj {
 
 /* ---------------- definiciones por tabla ---------------- */
 
-const ROLES = ['secretaria', 'kinesiologo', 'medico', 'coordinador'] as const;
+export const ROLES = [
+  'secretaria', 'administrador', 'coordinador',
+  'kinesiologo', 'medico', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional'
+] as const;
+const SESSION_TYPES = ['rehabilitacion', 'entrenamiento', 'practica'] as const;
+const TRAINING_FREQ = ['1', '2', '3', 'libre'] as const;
+const PRACTICES = ['osteopatia', 'rpg', 'evaluacion_funcional', 'atm', 'nutricion', 'vestibular'] as const;
 const SESSION_STATUS = ['prog', 'asist', 'falto', 'rec-done', 'cancel'] as const;
 const PLAN_STATUS = ['activo', 'finalizado'] as const;
 const HOLIDAY_TYPES = ['nacional', 'provincial', 'festivo', 'nolab'] as const;
@@ -84,6 +92,7 @@ const HOLIDAY: Field[] = [
 ];
 const USER: Field[] = [
   ['name', 'name', 'text'], ['dni', 'dni', 'text'], ['title', 'title', 'text'], ['role', 'role', ROLES],
+  ['profiles', 'profiles', { arrayOf: ROLES }],
   ['roles', 'kine_roles', 'textarr'], ['photo', 'photo', 'text']
 ];
 const SCHEDULE: Field[] = [['on', 'works', 'bool'], ['from', 'from_hour', 'int'], ['to', 'to_hour', 'int']];
@@ -96,7 +105,8 @@ const PLAN: Field[] = [
   ['proId', 'professional_id', 'text'], ['total', 'total_sessions', 'int'], ['placed', 'placed_sessions', 'int'],
   ['recUsed', 'recoveries_used', 'int'], ['dx', 'diagnosis', 'text'], ['start', 'start_date', 'date'],
   ['lastDate', 'last_date', 'date'], ['status', 'status', PLAN_STATUS], ['billMonth', 'bill_month', 'ym'],
-  ['endNote', 'end_note', 'text'], ['endAt', 'ended_at', 'ms'], ['created', 'created_at', 'ms']
+  ['endNote', 'end_note', 'text'], ['endAt', 'ended_at', 'ms'], ['created', 'created_at', 'ms'],
+  ['type', 'session_type', SESSION_TYPES], ['freq', 'training_frequency', TRAINING_FREQ], ['practice', 'practice', PRACTICES]
 ];
 const PATTERN: Field[] = [['h', 'hour', 'int'], ['m', 'minute', 'int']];
 const NOTE: Field[] = [
@@ -353,11 +363,11 @@ export const MAPPINGS: Record<string, Mapping> = { config, users, patients, agen
 export const COLUMNS: Record<string, string[]> = {
   app_config: ['id', 'center_name', 'open_hour', 'close_hour', 'capacity_per_hour', 'work_days', 'med_minutes', 'max_overbooks', 'max_recoveries', 'end_reminder_sessions', 'kine_roles', 'category_prices', 'holidays_auto', 'nolab_closes_center', 'extra'],
   holidays: ['date', 'month_day', 'name', 'type', 'closed', 'removed', 'yearly', 'from_year', 'extra'],
-  users: ['id', 'name', 'dni', 'title', 'role', 'kine_roles', 'photo', 'active', 'extra'],
+  users: ['id', 'name', 'dni', 'title', 'role', 'profiles', 'kine_roles', 'photo', 'active', 'extra'],
   user_schedules: ['user_id', 'weekday', 'works', 'from_hour', 'to_hour', 'extra'],
   patients: ['id', 'name', 'dni', 'phone', 'insurance', 'affiliate_no', 'pay_category', 'notes', 'created_at', 'updated_at', 'extra'],
   patient_professionals: ['patient_id', 'user_id', 'pos'],
-  treatment_plans: ['id', 'patient_id', 'professional_id', 'total_sessions', 'placed_sessions', 'recoveries_used', 'diagnosis', 'start_date', 'last_date', 'status', 'bill_month', 'end_note', 'ended_at', 'created_at', 'pos', 'extra'],
+  treatment_plans: ['id', 'patient_id', 'professional_id', 'total_sessions', 'placed_sessions', 'recoveries_used', 'diagnosis', 'start_date', 'last_date', 'status', 'bill_month', 'end_note', 'ended_at', 'created_at', 'session_type', 'training_frequency', 'practice', 'pos', 'extra'],
   plan_day_patterns: ['plan_id', 'weekday', 'hour', 'minute', 'extra'],
   patient_notes: ['id', 'patient_id', 'author_id', 'author_name', 'text', 'session_date', 'session_number', 'created_at', 'pos', 'extra'],
   agenda_weeks: ['week', 'professional_id', 'extra'],

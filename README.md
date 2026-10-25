@@ -7,10 +7,14 @@ pacientes, registro/facturación, equipo, noticias del día y copias de segurida
 ## Cómo está armada
 
 - `public/agenda/app.js` y `app/agenda.css`: la aplicación original, con el mismo diseño y las mismas reglas.
-  Lo único distinto es el ingreso: cada persona entra con su **DNI** (ver "Ingreso con DNI").
+  Lo distinto: cada persona entra con su **DNI** (ver "Ingreso con DNI"), cada profesional tiene su agenda
+  independiente (ver "Perfiles y permisos") y toda la app usa la hora de **Buenos Aires** (`America/Argentina/Buenos_Aires`),
+  sin importar la zona horaria de la computadora o del servidor.
 - `public/agenda/neon-db.js`: cliente que reemplaza la base del HTML original y habla con las rutas `/api/db/*`.
   Revisa cambios cada 2,5 s, así que lo que carga una persona aparece solo en las pantallas de las demás.
-- `app/api/db/*`: rutas de Next.js que leen y escriben en Neon (`DATABASE_URL`).
+- `app/api/db/*`: rutas de Next.js que leen y escriben en Neon (`DATABASE_URL`). Todas piden sesión.
+- `app/api/auth/*`, `lib/auth.ts`: ingreso con DNI y sesión en una cookie firmada.
+- `lib/access.ts`: qué puede ver y modificar cada perfil. Se controla en el servidor, no solo en pantalla.
 - `lib/docmap.ts` y `lib/store.ts`: traducen lo que guarda la app a **tablas relacionales** y de vuelta.
 - `prisma/`: esquema y migraciones de la base con **Prisma**. Prisma se usa solo para migrar; la app consulta con el driver de Neon.
 
@@ -21,9 +25,9 @@ Basadas en el `schema.sql` de referencia:
 | Tabla | Contenido |
 |---|---|
 | `app_config`, `holidays` | Configuración general y feriados cargados a mano |
-| `users`, `user_schedules` | Perfiles (con su `dni` en texto plano) y horario por día |
+| `users`, `user_schedules` | Integrantes (con su `dni` en texto plano y sus `profiles`) y horario por día |
 | `patients`, `patient_professionals`, `patient_notes` | Pacientes, sus profesionales y notas tipo historia clínica |
-| `treatment_plans`, `plan_day_patterns` | Tratamientos y su patrón de días/horas |
+| `treatment_plans`, `plan_day_patterns` | Tratamientos (con su tipo de sesión) y su patrón de días/horas |
 | `agenda_weeks`, `sessions`, `agenda_blocks` | Semanas de agenda por profesional, cada turno y los bloqueos de "Cancelar agenda" |
 | `billing_months`, `billing_patients` | Registro mensual de facturado y liquidado |
 | `news` | Noticias de Inicio |
@@ -46,6 +50,8 @@ Si `DATABASE_URL` no está definida, la agenda funciona en **modo local** (datos
 2. Antes de **Deploy**, en **Environment Variables** agregá:
    - `DATABASE_URL` = la cadena *pooled* de Neon.
    - `DATABASE_URL_UNPOOLED` = la cadena directa (opcional; si no está, las migraciones usan `DATABASE_URL`).
+   - `SESSION_SECRET` = un texto largo al azar (opcional). Firma la cookie de sesión; si no está, se deriva de `DATABASE_URL`.
+     Si lo cambiás, todos tienen que volver a ingresar.
 3. Tocá **Deploy**. Cada build corre `prisma migrate deploy` antes de `next build` (script `vercel-build`),
    así que la base queda siempre al día con las migraciones del repo. Si la base está vacía, la primera pantalla pide crear la cuenta de secretaría (nombre y DNI).
 
@@ -70,22 +76,45 @@ npm run dev                  # http://localhost:3000
 - Subí esa carpeta al repo: el próximo deploy de Vercel la aplica en producción.
 - `npm run db:status` muestra qué migraciones faltan aplicar.
 
+## Perfiles y permisos
+
+Cada integrante puede tener **uno o más perfiles** (por ejemplo Kinesiología y Administración); los permisos se suman.
+
+| Perfil | Qué puede hacer |
+|---|---|
+| Kinesiología, Médico/a, Profesor/a de educación física, Fonoaudiología, Terapia ocupacional | Tiene **su propia agenda y sus horarios**. Ve y modifica solo sus turnos, sus cancelaciones, su registro mensual y sus pacientes. De un paciente que también atiende otro profesional, ve solo sus tratamientos y sus notas (más las de administración). |
+| Secretaría, Administración | Ve y edita todo: todas las agendas, pacientes, equipo, ajustes y copias de seguridad. |
+| Coordinación | Publica noticias de Inicio. |
+
+Un profesional no puede leer ni escribir la agenda de otro aunque llame a la API a mano: el servidor lo rechaza (403).
+
+## Tipos de sesión
+
+Al agendar un tratamiento nuevo se elige el tipo (queda en `treatment_plans.session_type`):
+
+- **Rehabilitación**.
+- **Entrenamiento**, con frecuencia de 1, 2 o 3 veces por semana o **pase libre** (`training_frequency`). Con 1, 2 o 3 veces hay que marcar esa cantidad de días.
+- **Práctica diferenciada**: Osteopatía, RPG, Evaluación funcional, ATM, Nutrición o Vestibular (`practice`).
+
+El tipo se ve en el turno y en la ficha del paciente, donde también se puede cambiar.
+
 ## Ingreso con DNI
 
 - Cada perfil entra escribiendo su DNI (se guarda en texto plano en `users.dni` y se compara sin puntos ni espacios).
+  El servidor guarda la sesión en una cookie firmada que dura 12 horas.
 - La secretaría carga o cambia el DNI de cada integrante en **Equipo**. No se permiten dos perfiles con el mismo DNI.
 - Si hay perfiles pero ninguno tiene DNI (por ejemplo, después de importar datos), la pantalla de ingreso pide
-  elegir el perfil de secretaría y cargar su DNI. Desde ahí se cargan los del resto.
+  elegir un perfil de secretaría o administración y cargar su DNI. Desde ahí se cargan los del resto.
 - También se puede cargar a mano en Neon → SQL Editor: `UPDATE users SET dni = '12345678' WHERE name = 'Pamela';`
 
-> El sitio no tiene contraseña ni usuario aparte: cualquiera que conozca la URL puede usar la API y ver los datos,
-> incluidos los DNI. Si más adelante se quiere cerrar, Vercel tiene **Deployment Protection** (Settings → Deployment Protection).
+> No hay contraseña: quien conozca el DNI de alguien puede ingresar como esa persona. Para cerrar más el sitio,
+> Vercel tiene **Deployment Protection** (Settings → Deployment Protection).
 
 ## Importar datos
 
 `datos-agenda.json` (export de la agenda HTML) **no** está en el repo porque tiene datos personales. Dos formas de cargarlo:
 
 - **Desde Neon**: pegá el archivo `importar-datos.sql` en Neon → SQL Editor y tocá **Run** (después del primer deploy, que crea las tablas). No pisa nada que ya exista.
-- **Por la API**: `npm run db:import -- ruta/a/datos-agenda.json https://tu-agenda.vercel.app`. También acepta una copia descargada desde Ajustes.
+- **Por la API**: `npm run db:import -- ruta/a/datos-agenda.json https://tu-agenda.vercel.app <DNI de administración>`. También acepta una copia descargada desde Ajustes. Conserva los DNI y perfiles ya cargados.
 
 Después de importar, cargá los DNI (ver arriba).

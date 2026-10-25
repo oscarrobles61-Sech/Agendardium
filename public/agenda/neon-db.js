@@ -18,6 +18,8 @@
     if (!r.ok) {
       let msg = 'HTTP ' + r.status;
       try { const j = await r.json(); if (j && j.error) msg = j.error; } catch (e) {}
+      // Sesión vencida o cerrada: la agenda vuelve a la pantalla de ingreso.
+      if (r.status === 401 && !url.startsWith('/api/auth/')) window.dispatchEvent(new Event('agenda:sin-sesion'));
       const err = new Error(msg); err.status = r.status; throw err;
     }
     return r.json();
@@ -113,6 +115,16 @@
       const h = await call('GET', '/api/health');
       if (!h || !h.db) return null;
       return { doc, collection: col => query(col, {}) };
-    }
+    },
+    // Ingreso con DNI: el servidor guarda la sesión en una cookie y controla los permisos.
+    auth: {
+      state: () => call('GET', '/api/auth/state'),
+      login: dni => call('POST', '/api/auth/login', { dni }),
+      logout: () => call('POST', '/api/auth/logout', {}),
+      setup: (name, dni, cfg) => call('POST', '/api/auth/setup', { name, dni, cfg }),
+      claim: (id, dni) => call('POST', '/api/auth/claim', { id, dni })
+    },
+    // Corta todas las suscripciones (al cerrar sesión).
+    stopAll() { subs.clear(); if (timer) { clearInterval(timer); timer = null; } versions = {}; }
   };
 })();

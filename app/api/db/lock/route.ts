@@ -1,11 +1,12 @@
-import type { NextRequest } from 'next/server';
 import { BadRequest, checkCol, checkId, sql } from '@/lib/db';
-import { handler } from '@/lib/route';
+import { Forbidden } from '@/lib/access';
+import { authed } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 
 // Toma un candado con vencimiento: lo obtiene quien llega primero o quien ya lo tenía.
-export const POST = handler(async (req: NextRequest) => {
+export const POST = authed(async (req, me) => {
+  if (!me.admin) throw new Forbidden('Solo administración.');
   const body = await req.json().catch(() => null);
   const col = checkCol(body?.col), id = checkId(body?.id);
   const holder = String(body.holder || '').slice(0, 200);

@@ -133,6 +133,8 @@ async function load(col: string, ids: string[] | null, agendaFilter: { week?: st
   return out;
 }
 
+export const getDocsRaw = (col: string) => load(col, null);
+
 export async function getDoc(col: string, id: string): Promise<Obj | null> {
   const docs = await load(col, [id]);
   return docs.length ? docs[0].data : null;
@@ -141,7 +143,10 @@ export async function getDoc(col: string, id: string): Promise<Obj | null> {
 const cmp = (a: unknown, b: unknown) =>
   a === b ? 0 : a == null ? 1 : b == null ? -1 : (a as number | string) < (b as number | string) ? -1 : 1;
 
-export async function queryDocs(col: string, where: Where[], orderBy: [string, string] | null, limit: number): Promise<Doc[]> {
+export async function queryDocs(
+  col: string, where: Where[], orderBy: [string, string] | null, limit: number,
+  visible: (docs: Doc[]) => Promise<Doc[]> = async d => d
+): Promise<Doc[]> {
   const agendaFilter: { week?: string; proId?: string } = {};
   if (col === 'agenda') for (const [f, , v] of where) {
     if (f === 'week' && typeof v === 'string') agendaFilter.week = v;
@@ -150,7 +155,7 @@ export async function queryDocs(col: string, where: Where[], orderBy: [string, s
   // Si la semana no tiene formato de fecha no hay filas relacionales que coincidan; igual se filtra abajo.
   if (agendaFilter.week && !/^\d{4}-\d{2}-\d{2}$/.test(agendaFilter.week)) delete agendaFilter.week;
   let docs = await load(col, null, agendaFilter);
-  docs = docs.filter(d => where.every(([f, , v]) => JSON.stringify(d.data[f] ?? null) === JSON.stringify(v ?? null)));
+  docs = await visible(docs.filter(d => where.every(([f, , v]) => JSON.stringify(d.data[f] ?? null) === JSON.stringify(v ?? null))));
   if (orderBy) {
     const [f, dir] = orderBy;
     docs.sort((a, b) => cmp(a.data[f], b.data[f]) * (dir === 'desc' && a.data[f] != null && b.data[f] != null ? -1 : 1) || cmp(a.id, b.id));
