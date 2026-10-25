@@ -70,11 +70,11 @@ function join(row: Row, fields: readonly Field[]): Obj {
 
 export const ROLES = [
   'secretaria', 'administrador', 'coordinador',
-  'kinesiologo', 'medico', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional'
+  'kinesiologo', 'medico', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional', 'nutricionista', 'psicologo'
 ] as const;
 const SESSION_TYPES = ['rehabilitacion', 'entrenamiento', 'practica'] as const;
 const TRAINING_FREQ = ['1', '2', '3', 'libre'] as const;
-const PRACTICES = ['osteopatia', 'rpg', 'evaluacion_funcional', 'atm', 'nutricion', 'vestibular'] as const;
+const PRACTICES = ['osteopatia', 'rpg', 'evaluacion_funcional', 'atm', 'nutricion', 'vestibular', 'piso_pelvico'] as const;
 const SESSION_STATUS = ['prog', 'asist', 'falto', 'rec-done', 'cancel'] as const;
 const PLAN_STATUS = ['activo', 'finalizado'] as const;
 const HOLIDAY_TYPES = ['nacional', 'provincial', 'festivo', 'nolab'] as const;
@@ -106,7 +106,8 @@ const PLAN: Field[] = [
   ['recUsed', 'recoveries_used', 'int'], ['dx', 'diagnosis', 'text'], ['start', 'start_date', 'date'],
   ['lastDate', 'last_date', 'date'], ['status', 'status', PLAN_STATUS], ['billMonth', 'bill_month', 'ym'],
   ['endNote', 'end_note', 'text'], ['endAt', 'ended_at', 'ms'], ['created', 'created_at', 'ms'],
-  ['type', 'session_type', SESSION_TYPES], ['freq', 'training_frequency', TRAINING_FREQ], ['practice', 'practice', PRACTICES]
+  ['type', 'session_type', SESSION_TYPES], ['freq', 'training_frequency', TRAINING_FREQ], ['practice', 'practice', PRACTICES],
+  ['spec', 'specialty', 'text'], ['until', 'until_date', 'date']
 ];
 const PATTERN: Field[] = [['h', 'hour', 'int'], ['m', 'minute', 'int']];
 const NOTE: Field[] = [
@@ -199,7 +200,8 @@ const users: Mapping = {
   fromRows(main, related) {
     const doc = join(main, USER);
     const schedule: Obj = {};
-    for (const s of related('user_schedules').sort((a, b) => (a.weekday as number) - (b.weekday as number))) schedule[String(s.weekday)] = join(s, SCHEDULE);
+    // Solo los horarios de este integrante (al leer todo el equipo vienen las filas de todos).
+    for (const s of related('user_schedules').filter(r => r.user_id === main.id).sort((a, b) => (a.weekday as number) - (b.weekday as number))) schedule[String(s.weekday)] = join(s, SCHEDULE);
     if (!('schedule' in doc)) doc.schedule = schedule;
     return doc;
   }
@@ -367,7 +369,7 @@ export const COLUMNS: Record<string, string[]> = {
   user_schedules: ['user_id', 'weekday', 'works', 'from_hour', 'to_hour', 'extra'],
   patients: ['id', 'name', 'dni', 'phone', 'insurance', 'affiliate_no', 'pay_category', 'notes', 'created_at', 'updated_at', 'extra'],
   patient_professionals: ['patient_id', 'user_id', 'pos'],
-  treatment_plans: ['id', 'patient_id', 'professional_id', 'total_sessions', 'placed_sessions', 'recoveries_used', 'diagnosis', 'start_date', 'last_date', 'status', 'bill_month', 'end_note', 'ended_at', 'created_at', 'session_type', 'training_frequency', 'practice', 'pos', 'extra'],
+  treatment_plans: ['id', 'patient_id', 'professional_id', 'total_sessions', 'placed_sessions', 'recoveries_used', 'diagnosis', 'start_date', 'last_date', 'status', 'bill_month', 'end_note', 'ended_at', 'created_at', 'session_type', 'training_frequency', 'practice', 'specialty', 'until_date', 'pos', 'extra'],
   plan_day_patterns: ['plan_id', 'weekday', 'hour', 'minute', 'extra'],
   patient_notes: ['id', 'patient_id', 'author_id', 'author_name', 'text', 'session_date', 'session_number', 'created_at', 'pos', 'extra'],
   agenda_weeks: ['week', 'professional_id', 'extra'],

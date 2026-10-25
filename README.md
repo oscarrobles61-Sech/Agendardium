@@ -82,7 +82,7 @@ Cada integrante puede tener **uno o más perfiles** (por ejemplo Kinesiología y
 
 | Perfil | Qué puede hacer |
 |---|---|
-| Kinesiología, Médico/a, Profesor/a de educación física, Fonoaudiología, Terapia ocupacional | Tiene **su propia agenda y sus horarios**. Ve y modifica solo sus turnos, sus cancelaciones, su registro mensual y sus pacientes. De un paciente que también atiende otro profesional, ve solo sus tratamientos y sus notas (más las de administración). |
+| Kinesiología, Médico/a, Profesor/a de educación física, Fonoaudiología, Terapia ocupacional, Nutrición, Psicología | Tiene **su propia agenda y sus horarios**. Ve y modifica solo sus turnos, sus cancelaciones, su registro mensual y sus pacientes. De un paciente que también atiende otro profesional, ve solo sus tratamientos y sus notas (más las de administración). |
 | Secretaría, Administración | Ve y edita todo: todas las agendas, pacientes, equipo, ajustes y copias de seguridad. |
 | Coordinación | Publica noticias de Inicio. |
 
@@ -90,13 +90,23 @@ Un profesional no puede leer ni escribir la agenda de otro aunque llame a la API
 
 ## Tipos de sesión
 
-Al agendar un tratamiento nuevo se elige el tipo (queda en `treatment_plans.session_type`):
+Cada profesional tiene sus **especialidades** (en Equipo). El tipo de sesión sale de la especialidad:
 
-- **Rehabilitación**.
-- **Entrenamiento**, con frecuencia de 1, 2 o 3 veces por semana o **pase libre** (`training_frequency`). Con 1, 2 o 3 veces hay que marcar esa cantidad de días.
-- **Práctica diferenciada**: Osteopatía, RPG, Evaluación funcional, ATM, Nutrición o Vestibular (`practice`).
+| Tipo | Especialidades |
+|---|---|
+| **Rehabilitación** | Miembro Superior, Miembro Inferior, Columna, Piso Pélvico, Neuro, Terapia Ocupacional, Psicología, Fonoaudiología |
+| **Entrenamiento** | Gimnasio, Pilates |
+| **Práctica diferenciada** | Osteopatía, Vestibular, Nutrición, Evaluación Funcional, Piso Pélvico, ATM, RPG |
 
-El tipo se ve en el turno y en la ficha del paciente, donde también se puede cambiar.
+Al agendar un tratamiento nuevo solo aparecen las especialidades de ese profesional (si no tiene ninguna cargada,
+se usan las de su profesión: por ejemplo Fonoaudiología o Nutrición; si tampoco hay, todas).
+
+- **Entrenamiento**: se elige la frecuencia (1, 2 o 3 veces por semana, o pase libre) y los días. Se cargan solas
+  todas las sesiones de un mes desde el día de inicio: si empieza el 28/10, hasta el 27/11 inclusive (el 28/11 arranca
+  el mes siguiente). Se saltean feriados, días cerrados, bloqueos y turnos completos.
+- **Práctica diferenciada**: cantidad de sesiones libre (hasta 999).
+
+Se guarda en `treatment_plans` (`session_type`, `specialty`, `training_frequency`, `practice`, `until_date`).
 
 ## Ingreso con DNI
 

@@ -9,7 +9,7 @@ export const COOKIE = 'agenda_sesion';
 const TTL_MS = 12 * 3600 * 1000;
 
 export const ADMIN_ROLES = ['secretaria', 'administrador'];
-export const PRO_ROLES = ['kinesiologo', 'medico', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional'];
+export const PRO_ROLES = ['kinesiologo', 'medico', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional', 'nutricionista', 'psicologo'];
 
 export type Me = { id: string; profiles: string[]; admin: boolean; pro: boolean; coord: boolean };
 

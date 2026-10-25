@@ -240,6 +240,8 @@ model treatment_plans {
   session_type       String?
   training_frequency String?
   practice           String?
+  specialty          String?
+  until_date         DateTime?           @db.Date
   plan_day_patterns  plan_day_patterns[]
   patients           patients            @relation(fields: [patient_id], references: [id], onDelete: Cascade)
 
@@ -304,4 +306,6 @@ enum user_role {
   profesor_ef
   fonoaudiologo
   terapista_ocupacional
+  nutricionista
+  psicologo
 }
