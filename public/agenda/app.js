@@ -283,7 +283,8 @@ function toast(msg) {
 }
 
 // Cupo de una hora: el del centro, salvo que el profesional lo haya bajado para esa hora (1 a cupo del centro).
-const capAt = (pro, h) => { const c = pro && pro.hourCap && +pro.hourCap[h]; return c >= 1 ? Math.min(c, S.cfg.cap) : S.cfg.cap; };
+// 0 = horario cerrado: no se aceptan ingresos en esa hora.
+const capAt = (pro, h) => { const v = pro && pro.hourCap ? pro.hourCap[h] : undefined; if (v === 0) return 0; const c = +v; return c >= 1 ? Math.min(c, S.cfg.cap) : S.cfg.cap; };
 function works(pro, d, h) {
   const sc = pro && pro.schedule && pro.schedule[d];
   // Hasta dos franjas por día (ej. 8 a 12 y 17 a 20): las horas del medio quedan cerradas.
@@ -617,13 +618,14 @@ function capModal(h) {
   openModal(`<button class="btn ghost small close" data-close>Cerrar</button><h2>Cupo de las ${h} h</h2>
     <p class="sub">¿Cuántos pacientes aceptás en esa hora? Vale para todos los días. Los turnos ya cargados no se tocan; solo no se aceptan más ingresos cuando se llega al cupo.</p>
     <div class="capgrid">${Array.from({ length: max }, (_, i) => i + 1).map(n => `<button type="button" class="btn ${n === cur ? '' : 'ghost'}" data-setcap="${n}">${n}</button>`).join('')}</div>
-    <p class="hint">${max} es el cupo normal del centro.</p>`);
+    <p class="hint">${max} es el cupo normal del centro.${cur ? '' : ' Ahora está cerrado: elegí un cupo para volver a abrirlo.'}</p>
+    <div class="actions"><button type="button" class="btn danger" data-setcap="0" ${cur ? '' : 'disabled'}>Cerrar horario</button></div>`);
   $('#modal').onclick = async e => {
     if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) return closeModal();
     const b = e.target.closest('[data-setcap]'); if (!b) return;
     const n = +b.dataset.setcap; const u = clone(S.users[S.me]); u.hourCap = { ...(u.hourCap || {}) };
     if (n >= max) delete u.hourCap[h]; else u.hourCap[h] = n;
-    try { await Store.setUser(S.me, u); S.users[S.me] = u; closeModal(); renderGrid(); toast(n >= max ? `Las ${h} h vuelven al cupo normal (${max})` : `Las ${h} h: se aceptan hasta ${n} pacientes`); }
+    try { await Store.setUser(S.me, u); S.users[S.me] = u; closeModal(); renderGrid(); toast(!n ? `Las ${h} h quedan cerradas: no se aceptan ingresos` : n >= max ? `Las ${h} h vuelven al cupo normal (${max})` : `Las ${h} h: se aceptan hasta ${n} pacientes`); }
     catch (er) { toast('No se pudo guardar el cupo.'); }
   };
 }
@@ -639,7 +641,7 @@ function freeAt(id, h) {
   const mon = parse(S.week); let free = 0, used = 0, works1 = false;
   S.cfg.days.forEach(d => {
     const date = fmt(addDays(mon, ORDER.indexOf(d)));
-    if (!works(pro, d, h) || isClosed(date) || blockAt(doc, date, h)) return; works1 = true;
+    if (!works(pro, d, h) || isClosed(date) || blockAt(doc, date, h) || !capAt(pro, h)) return; works1 = true;
     if (med) { for (let m = 0; m < 60; m += S.cfg.medMin) { const occ = (slots[slotKey(date, h, m)] || []).filter(p => occupies(p) && !p.sob).length; used += occ; free += occ ? 0 : 1; } }
     else { const occ = (slots[slotKey(date, h, null)] || []).filter(occupies).length; used += occ; free += Math.max(0, capAt(pro, h) - occ); }
   });
@@ -685,14 +687,13 @@ function viewAgenda() {
       ${S.proId && canEditAgenda(S.proId) ? '<button class="btn danger small" id="cancelag">Cancelar agenda</button><button class="btn ghost small" id="selmode">' + (S.sel ? 'Salir de selección' : 'Cancelar tratamiento') + '</button>' : ''}
       <button class="btn ghost small" id="zoom">${document.body.classList.contains('focus') ? 'Salir de ampliar' : 'Ampliar'}</button>
       <button class="btn ghost small only-m" id="fw">${S.fullWeek ? 'Un día' : 'Semana completa'}</button>
-      <span class="grow"></span>
-      ${sec && allPros.length ? `<label class="lbl rolefilter">Rol
+    </div>
+    ${sec && allPros.length ? `<div class="bar filters"><label class="lbl rolefilter">Rol
         <span class="fsugw"><input type="text" id="rf" class="sel-pro" autocomplete="off" placeholder="Escribí un rol" value="${esc(S.roleFilter === '*' ? '' : roleLabel(S.roleFilter))}" style="max-width:190px"><div id="rfsug" class="sug fsug" hidden></div></span></label>
         <label class="lbl rolefilter">Hora
         <span class="fsugw"><input type="text" id="hf" class="sel-pro" autocomplete="off" inputmode="numeric" placeholder="Ej. 17" value="${hf != null ? hf + ' h' : ''}" style="max-width:90px"><div id="hfsug" class="sug fsug" hidden></div></span></label>
         ${pros.length ? `<label class="lbl rolefilter">Agenda de
-        <select id="pro" class="sel-pro">${pros.map(([id, u]) => `<option value="${id}"${id === S.proId ? ' selected' : ''}>${esc(u.name)}${isMed(u) ? ' (médico/a)' : ''}${hf != null ? ` · ${fr[id].used} ${fr[id].used === 1 ? 'paciente' : 'pacientes'}, ${fr[id].free} libres` : ''}</option>`).join('')}</select></label>` : (hf != null ? `<span class="hint">Nadie de ese rol atiende a las ${hf} h esta semana.</span>` : '')}` : ''}
-    </div>
+        <select id="pro" class="sel-pro">${pros.map(([id, u]) => `<option value="${id}"${id === S.proId ? ' selected' : ''}>${esc(u.name)}${isMed(u) ? ' (médico/a)' : ''}${hf != null ? ` · ${fr[id].used} ${fr[id].used === 1 ? 'paciente' : 'pacientes'}, ${fr[id].free} libres` : ''}</option>`).join('')}</select></label>` : (hf != null ? `<span class="hint">Nadie de ese rol atiende a las ${hf} h esta semana.</span>` : '')}</div>` : ''}
     <p class="rothint">Tip: girá el celular en horizontal para ver toda la semana, como en la planilla.</p>
     <div id="rbar"></div>
     <div id="cxbar"></div>
@@ -839,8 +840,8 @@ function renderGrid() {
     const step = med ? S.cfg.medMin : 60;
     const nrows = med ? Math.floor(60 / step) : Math.max(cap, ...days.map(d => (slots[slotKey(dateOf(d), h, null)] || []).length));
     const hc = capAt(pro, h), mineCap = !med && S.proId === S.me && isPro(S.users[S.me]);
-    const capEl = med ? '' : mineCap ? `<button type="button" class="capbtn${hc < S.cfg.cap ? ' lim' : ''}" data-cap="${h}" title="Cupo de las ${h} h: tocá para cambiarlo">Cupo ${hc}</button>`
-      : hc < S.cfg.cap ? `<span class="capbtn lim" title="Cupo reducido por el profesional">Cupo ${hc}</span>` : '';
+    const capEl = med ? '' : mineCap ? `<button type="button" class="capbtn${hc < S.cfg.cap ? ' lim' : ''}" data-cap="${h}" title="Cupo de las ${h} h: tocá para cambiarlo o cerrar el horario">${hc ? 'Cupo ' + hc : 'Cerrado'}</button>`
+      : hc < S.cfg.cap ? `<span class="capbtn lim" title="${hc ? 'Cupo reducido por el profesional' : 'Horario cerrado por el profesional'}">${hc ? 'Cupo ' + hc : 'Cerrado'}</span>` : '';
     html += `<div class="hb" style="grid-row:span ${nrows}">${h}<small>hs</small>${capEl}</div>`;
     for (let r = 0; r < nrows; r++) {
       const m = med ? r * step : null;
@@ -861,7 +862,7 @@ function renderGrid() {
         } else {
           const e = arr[r];
           if (!e && !open) { html += `<div class="${base} off"></div>`; return; }
-          if (!e && r >= hc) { html += `<div class="${base} off capoff">${r === Math.max(hc, arr.length) ? '<span class="cxl">No se aceptan más ingresos</span>' : ''}</div>`; return; }
+          if (!e && r >= hc) { html += `<div class="${base} off capoff">${r === Math.max(hc, arr.length) ? `<span class="cxl">${hc ? 'No se aceptan más ingresos' : 'Horario cerrado'}</span>` : ''}</div>`; return; }
           const dr = !e && open && r === arr.length && draftAt(date, h, null);
           html += `<div class="${base}${e ? entryCls(e) : dr ? ' draft' : ' empty'}" ${data}${e ? ` data-eid="${e.id}"` : ''} ${e || r === arr.length ? 'tabindex="0"' : ''}>${e ? entryInner(e) : dr ? draftHTML(dr) : (open ? '<span class="plus">+</span>' : '')}</div>`;
         }

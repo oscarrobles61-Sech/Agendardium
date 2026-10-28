@@ -560,3 +560,5 @@ input[type=date]{width:100%;min-height:44px;padding:9px 12px;border-radius:12px;
 .ln.nosel{opacity:.4;cursor:not-allowed}
 .rbar.selbar{background:var(--soft)}
 .selact{display:flex;gap:8px;flex-wrap:wrap}
+.bar.filters{gap:14px}
+.bar.filters #pro{max-width:none;min-width:min(380px,100%)}
