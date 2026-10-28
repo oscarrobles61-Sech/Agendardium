@@ -244,7 +244,7 @@ const Store = (() => {
 const S = {
   auth: null,
   cfg: DEFAULT_CFG, users: {}, agenda: {}, patients: {}, news: {}, sel: null, hpro: null, q: '', pf: 'all', recover: null, moving: null, pm: fmt(nowBA()).slice(0, 7), ppro: null, pview: 'month', openPat: {}, fullWeek: false, month: fmt(nowBA()).slice(0, 7), mdet: false, me: null, tab: 'home',
-  week: fmt(mondayOf(nowBA())), proId: null, mobDay: null, roleFilter: '*',
+  week: fmt(mondayOf(nowBA())), proId: null, mobDay: null, roleFilter: '*', hourFilter: null,
   ready: { cfg: false, users: false }, sig: ''
 };
 let M = null;                 // turno abierto en el modal
@@ -282,6 +282,8 @@ function toast(msg) {
   clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 3200);
 }
 
+// Cupo de una hora: el del centro, salvo que el profesional lo haya bajado para esa hora (1 a cupo del centro).
+const capAt = (pro, h) => { const c = pro && pro.hourCap && +pro.hourCap[h]; return c >= 1 ? Math.min(c, S.cfg.cap) : S.cfg.cap; };
 function works(pro, d, h) {
   const sc = pro && pro.schedule && pro.schedule[d];
   // Hasta dos franjas por día (ej. 8 a 12 y 17 a 20): las horas del medio quedan cerradas.
@@ -582,7 +584,7 @@ function renderShell() {
 function renderView(force) {
   if (S.tab === 'home') { if (force || !$('#newsbox')) viewHome(); return; }
   if (!force && (S.tab === 'config' || S.tab === 'profile' || S.tab === 'month')) return;   // no pisar formularios abiertos
-  if (S.tab === 'agenda') viewAgenda();
+  if (S.tab === 'agenda') { const ae = document.activeElement; if (!force && ae && (ae.id === 'rf' || ae.id === 'hf')) return; viewAgenda(); } // no cortar lo que se está tipeando en el filtro
   else if (S.tab === 'patients') { if (force || !$('#plist')) viewPatients(); else renderPatientList(); }
   else if (S.tab === 'month') viewMonth();
   else if (S.tab === 'team' && isSec()) viewTeam();
@@ -609,10 +611,67 @@ function weekLabel() {
     : `${a.getDate()} ${MONTHS_S[a.getMonth()]} – ${b.getDate()} ${MONTHS_S[b.getMonth()]} ${b.getFullYear()}`;
 }
 
+/* ---- cupo por hora (lo fija cada profesional en su agenda) ---- */
+function capModal(h) {
+  const me = S.users[S.me]; if (!me) return; const cur = capAt(me, h); const max = S.cfg.cap;
+  openModal(`<button class="btn ghost small close" data-close>Cerrar</button><h2>Cupo de las ${h} h</h2>
+    <p class="sub">¿Cuántos pacientes aceptás en esa hora? Vale para todos los días. Los turnos ya cargados no se tocan; solo no se aceptan más ingresos cuando se llega al cupo.</p>
+    <div class="capgrid">${Array.from({ length: max }, (_, i) => i + 1).map(n => `<button type="button" class="btn ${n === cur ? '' : 'ghost'}" data-setcap="${n}">${n}</button>`).join('')}</div>
+    <p class="hint">${max} es el cupo normal del centro.</p>`);
+  $('#modal').onclick = async e => {
+    if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) return closeModal();
+    const b = e.target.closest('[data-setcap]'); if (!b) return;
+    const n = +b.dataset.setcap; const u = clone(S.users[S.me]); u.hourCap = { ...(u.hourCap || {}) };
+    if (n >= max) delete u.hourCap[h]; else u.hourCap[h] = n;
+    try { await Store.setUser(S.me, u); S.users[S.me] = u; closeModal(); renderGrid(); toast(n >= max ? `Las ${h} h vuelven al cupo normal (${max})` : `Las ${h} h: se aceptan hasta ${n} pacientes`); }
+    catch (er) { toast('No se pudo guardar el cupo.'); }
+  };
+}
+
+/* ---- filtro de agendas (secretaría): rol con sugerencias y hora ---- */
+const roleOptions = () => [['*', 'Todos'], ['__med', 'Médicos'],
+  ...['kinesiologo', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional', 'nutricionista', 'psicologo'].map(r => ['__r:' + r, ROLE_LABEL[r]]),
+  ...S.cfg.roles.map(r => [r, r])];
+const roleLabel = v => (roleOptions().find(([k]) => k === v) || [, ''])[1];
+// Lugar libre de un profesional a una hora en la semana que se ve (días que trabaja, sin feriados ni bloqueos).
+function freeAt(id, h) {
+  const pro = S.users[id]; const med = isMed(pro); const doc = S.agenda[S.week + '_' + id]; const slots = (doc && doc.slots) || {};
+  const mon = parse(S.week); let free = 0, used = 0, works1 = false;
+  S.cfg.days.forEach(d => {
+    const date = fmt(addDays(mon, ORDER.indexOf(d)));
+    if (!works(pro, d, h) || isClosed(date) || blockAt(doc, date, h)) return; works1 = true;
+    if (med) { for (let m = 0; m < 60; m += S.cfg.medMin) { const occ = (slots[slotKey(date, h, m)] || []).filter(p => occupies(p) && !p.sob).length; used += occ; free += occ ? 0 : 1; } }
+    else { const occ = (slots[slotKey(date, h, null)] || []).filter(occupies).length; used += occ; free += Math.max(0, capAt(pro, h) - occ); }
+  });
+  return { works: works1, free, used };
+}
+function bindSuggest(input, box, items, pick) {
+  const show = () => {
+    const q = norm(input.value).trim(); const list = items().filter(([, l]) => !q || norm(l).includes(q)).slice(0, 12);
+    box.innerHTML = list.map(([k, l]) => `<button type="button" class="sugi" data-k="${esc(k)}">${esc(l)}</button>`).join('');
+    box.hidden = !list.length;
+  };
+  input.onfocus = () => { input.select(); show(); };
+  input.oninput = show;
+  input.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); const f = box.querySelector('[data-k]'); if (f) pick(f.dataset.k); }
+    if (e.key === 'Escape') { box.hidden = true; input.blur(); }
+  };
+  box.onmousedown = e => e.preventDefault(); // que no se pierda el foco antes del clic
+  box.onclick = e => { const b = e.target.closest('[data-k]'); if (b) pick(b.dataset.k); };
+  input.onblur = () => setTimeout(() => { box.hidden = true; }, 150);
+}
+
 function viewAgenda() {
   const sec = isSec();
   const allPros = Object.entries(S.users).filter(([, u]) => isPro(u));
-  const pros = allPros.filter(([, u]) => S.roleFilter === '*' || (S.roleFilter === '__med' ? isMed(u) : S.roleFilter.startsWith('__r:') ? hasRole(u, S.roleFilter.slice(4)) : proSpecs(u).includes(S.roleFilter))).sort(byName);
+  let pros = allPros.filter(([, u]) => S.roleFilter === '*' || (S.roleFilter === '__med' ? isMed(u) : S.roleFilter.startsWith('__r:') ? hasRole(u, S.roleFilter.slice(4)) : proSpecs(u).includes(S.roleFilter))).sort(byName);
+  // Con hora elegida: solo quienes atienden a esa hora, primero el que tiene menos pacientes (más lugar libre).
+  const hf = sec && S.hourFilter != null ? S.hourFilter : null; const fr = {};
+  if (hf != null) {
+    pros.forEach(([id]) => { fr[id] = freeAt(id, hf); });
+    pros = pros.filter(([id]) => fr[id].works).sort((a, b) => fr[a[0]].used - fr[b[0]].used || fr[b[0]].free - fr[a[0]].free || byName(a, b));
+  }
   if (sec) { if (!S.proId || !pros.some(p => p[0] === S.proId)) S.proId = pros[0] ? pros[0][0] : null; }
   else S.proId = S.me;
   if (S.sel && S.sel.proId !== S.proId) S.sel = null;
@@ -628,9 +687,11 @@ function viewAgenda() {
       <button class="btn ghost small only-m" id="fw">${S.fullWeek ? 'Un día' : 'Semana completa'}</button>
       <span class="grow"></span>
       ${sec && allPros.length ? `<label class="lbl rolefilter">Rol
-        <select id="rf" class="sel-pro" style="max-width:180px"><option value="*">Todos</option><option value="__med"${S.roleFilter === '__med' ? ' selected' : ''}>Médicos</option>${['profesor_ef', 'fonoaudiologo', 'terapista_ocupacional', 'nutricionista', 'psicologo'].map(r => `<option value="__r:${r}"${S.roleFilter === '__r:' + r ? ' selected' : ''}>${ROLE_LABEL[r]}</option>`).join('')}${S.cfg.roles.map(r => `<option value="${esc(r)}"${S.roleFilter === r ? ' selected' : ''}>${esc(r)}</option>`).join('')}</select></label>
+        <span class="fsugw"><input type="text" id="rf" class="sel-pro" autocomplete="off" placeholder="Escribí un rol" value="${esc(S.roleFilter === '*' ? '' : roleLabel(S.roleFilter))}" style="max-width:190px"><div id="rfsug" class="sug fsug" hidden></div></span></label>
+        <label class="lbl rolefilter">Hora
+        <span class="fsugw"><input type="text" id="hf" class="sel-pro" autocomplete="off" inputmode="numeric" placeholder="Ej. 17" value="${hf != null ? hf + ' h' : ''}" style="max-width:90px"><div id="hfsug" class="sug fsug" hidden></div></span></label>
         ${pros.length ? `<label class="lbl rolefilter">Agenda de
-        <select id="pro" class="sel-pro">${pros.map(([id, u]) => `<option value="${id}"${id === S.proId ? ' selected' : ''}>${esc(u.name)}${isMed(u) ? ' (médico/a)' : ''}</option>`).join('')}</select></label>` : ''}` : ''}
+        <select id="pro" class="sel-pro">${pros.map(([id, u]) => `<option value="${id}"${id === S.proId ? ' selected' : ''}>${esc(u.name)}${isMed(u) ? ' (médico/a)' : ''}${hf != null ? ` · ${fr[id].used} ${fr[id].used === 1 ? 'paciente' : 'pacientes'}, ${fr[id].free} libres` : ''}</option>`).join('')}</select></label>` : (hf != null ? `<span class="hint">Nadie de ese rol atiende a las ${hf} h esta semana.</span>` : '')}` : ''}
     </div>
     <p class="rothint">Tip: girá el celular en horizontal para ver toda la semana, como en la planilla.</p>
     <div id="rbar"></div>
@@ -656,7 +717,19 @@ function viewAgenda() {
   $('#fw').onclick = () => { S.fullWeek = !S.fullWeek; $('#fw').textContent = S.fullWeek ? 'Un día' : 'Semana completa'; renderGrid(); };
   $('#today').onclick = () => { S.week = fmt(mondayOf(nowBA())); S.mobDay = null; viewAgenda(); };
   const sp = $('#pro'); if (sp) sp.onchange = () => { S.proId = sp.value; renderGrid(); };
-  const rf = $('#rf'); if (rf) rf.onchange = () => { S.roleFilter = rf.value; S.proId = null; viewAgenda(); };
+  const rf = $('#rf');
+  if (rf) {
+    bindSuggest(rf, $('#rfsug'), roleOptions, k => { S.roleFilter = k; S.proId = null; viewAgenda(); });
+    rf.addEventListener('change', () => { if (!rf.value.trim() && S.roleFilter !== '*') { S.roleFilter = '*'; S.proId = null; viewAgenda(); } });
+    const hfi = $('#hf');
+    const hours = () => [['', 'Cualquier hora'], ...Array.from({ length: S.cfg.close - S.cfg.open }, (_, i) => [String(S.cfg.open + i), `${S.cfg.open + i} h`])];
+    bindSuggest(hfi, $('#hfsug'), hours, k => { S.hourFilter = k === '' ? null : +k; S.proId = null; viewAgenda(); });
+    hfi.addEventListener('change', () => {
+      const v = hfi.value.trim(); const n = parseInt(v, 10);
+      const nv = !v ? null : (n >= S.cfg.open && n < S.cfg.close ? n : S.hourFilter);
+      if (nv !== S.hourFilter) { S.hourFilter = nv; S.proId = null; viewAgenda(); }
+    });
+  }
   renderRecoverBar();
   renderSelBar();
   renderGrid();
@@ -765,7 +838,10 @@ function renderGrid() {
     }
     const step = med ? S.cfg.medMin : 60;
     const nrows = med ? Math.floor(60 / step) : Math.max(cap, ...days.map(d => (slots[slotKey(dateOf(d), h, null)] || []).length));
-    html += `<div class="hb" style="grid-row:span ${nrows}">${h}<small>hs</small></div>`;
+    const hc = capAt(pro, h), mineCap = !med && S.proId === S.me && isPro(S.users[S.me]);
+    const capEl = med ? '' : mineCap ? `<button type="button" class="capbtn${hc < S.cfg.cap ? ' lim' : ''}" data-cap="${h}" title="Cupo de las ${h} h: tocá para cambiarlo">Cupo ${hc}</button>`
+      : hc < S.cfg.cap ? `<span class="capbtn lim" title="Cupo reducido por el profesional">Cupo ${hc}</span>` : '';
+    html += `<div class="hb" style="grid-row:span ${nrows}">${h}<small>hs</small>${capEl}</div>`;
     for (let r = 0; r < nrows; r++) {
       const m = med ? r * step : null;
       days.forEach(d => {
@@ -785,6 +861,7 @@ function renderGrid() {
         } else {
           const e = arr[r];
           if (!e && !open) { html += `<div class="${base} off"></div>`; return; }
+          if (!e && r >= hc) { html += `<div class="${base} off capoff">${r === Math.max(hc, arr.length) ? '<span class="cxl">No se aceptan más ingresos</span>' : ''}</div>`; return; }
           const dr = !e && open && r === arr.length && draftAt(date, h, null);
           html += `<div class="${base}${e ? entryCls(e) : dr ? ' draft' : ' empty'}" ${data}${e ? ` data-eid="${e.id}"` : ''} ${e || r === arr.length ? 'tabindex="0"' : ''}>${e ? entryInner(e) : dr ? draftHTML(dr) : (open ? '<span class="plus">+</span>' : '')}</div>`;
         }
@@ -797,6 +874,7 @@ function renderGrid() {
   g.onclick = e => {
     if (S.justDragged) return;
     const fb = e.target.closest('[data-fold]'); if (fb) { Folds.toggle(fb.dataset.fold); renderGrid(); return; }
+    const cb = e.target.closest('[data-cap]'); if (cb) { capModal(+cb.dataset.cap); return; }
     const phb = e.target.closest('[data-photo]'); if (phb) return pickPhoto(phb.dataset.photo);
     const ln = e.target.closest('.ln'); if (!ln || ln.classList.contains('off')) return;
     const date = ln.dataset.date, h = +ln.dataset.h, d = +ln.dataset.d, m = ln.dataset.m != null ? +ln.dataset.m : null;
@@ -882,7 +960,7 @@ function entryHTML(p, can) {
 }
 
 function slotListHTML() {
-  const list = slotData(); const cap = S.cfg.cap; const can = canEditAgenda(M.proId);
+  const list = slotData(); const cap = capAt(S.users[M.proId], M.h); const can = canEditAgenda(M.proId);
   if (M.eid) {
     const p = list.find(x => x.id === M.eid);
     return p ? `<ul class="plist">${entryHTML(p, can)}</ul>` : '';
@@ -1192,7 +1270,7 @@ async function addSessions(o) {
     if (wk !== curWk) { await flush(); curWk = wk; curId = wk + '_' + o.proId; curDoc = (await Store.getAgenda(curId)) || { week: wk, proId: o.proId, slots: {} }; curDoc.slots = curDoc.slots || {}; }
     const key = slotKey(date, o.h, med ? o.m : null); const arr = curDoc.slots[key] || [];
     const occ = arr.filter(occupies); const reg = occ.filter(p => !p.sob).length, sobN = occ.length - reg;
-    const fits = med ? (o.sob ? sobN < S.cfg.sobre : reg < 1) : occ.length < cap;
+    const fits = med ? (o.sob ? sobN < S.cfg.sobre : reg < 1) : occ.length < capAt(pro, o.h);
     if (!works(pro, d, o.h) || isClosed(date) || blockAt(curDoc, date, o.h) || !fits) { skipped++; continue; }
     n++;
     const entry = { id: uid(), name: o.name, phone: o.phone, note: o.note, pid, tid, n, series: tid, status: 'prog', by: S.me };
@@ -1332,7 +1410,7 @@ async function doRecover(date, h, d, m) {
     const get = async wk => { const id = wk + '_' + r.proId; if (!docs[id]) { docs[id] = (await Store.getAgenda(id)) || { week: wk, proId: r.proId, slots: {} }; docs[id].slots = docs[id].slots || {}; } return docs[id]; };
     const dd = await get(mondayKey(date)); const arr = dd.slots[dest] || [];
     const occ = arr.filter(occupies);
-    const fits = med ? occ.filter(p => !p.sob).length < 1 : occ.length < S.cfg.cap;
+    const fits = med ? occ.filter(p => !p.sob).length < 1 : occ.length < capAt(pro, h);
     if (!works(pro, d, h) || isClosed(date) || blockAt(dd, date, h) || !fits) return toast('Ese turno no está disponible.');
     if (date === r.date && dest === r.key) return toast('Elegí un turno distinto al original.');
     const pt = await Store.getPatient(r.pid); const pl = pt && pt.plans && pt.plans[r.tid];
@@ -1374,7 +1452,7 @@ async function moveEntry(src, date, h, d, m) {
     const dd = await get(mondayKey(date)); const arr = dd.slots[destKey] || [];
     const occ = arr.filter(occupies);
     let fits = true;
-    if (occupies(ent) || ent.status === 'cancel') fits = med ? (ent.sob ? occ.filter(p => p.sob).length < S.cfg.sobre : occ.filter(p => !p.sob).length < 1) : occ.length < S.cfg.cap;
+    if (occupies(ent) || ent.status === 'cancel') fits = med ? (ent.sob ? occ.filter(p => p.sob).length < S.cfg.sobre : occ.filter(p => !p.sob).length < 1) : occ.length < capAt(pro, h);
     if (!works(pro, d, h) || isClosed(date) || blockAt(dd, date, h) || !fits) { toast('Ese turno no está disponible (completo, fuera de horario, feriado o agenda cancelada).'); return false; }
     if (ent.status === 'cancel') { ent.status = 'prog'; delete ent.cancelReason; delete ent.cancelGid; }
     arrS.splice(idx, 1);
@@ -2318,7 +2396,7 @@ async function autoReschedule(proId, only) {
         if (blockAt(doc, date, slot.h) || !works(pro, d, slot.h)) continue;
         const key = slotKey(date, slot.h, med ? slot.m : null); const arr = doc.slots[key] || [];
         const occ = arr.filter(occupies);
-        if (!(med ? occ.filter(p => !p.sob).length < 1 : occ.length < cap)) continue;
+        if (!(med ? occ.filter(p => !p.sob).length < 1 : occ.length < capAt(pro, slot.h))) continue;
         if (it.ent.status === 'cancel') { it.ent.status = 'prog'; delete it.ent.cancelReason; delete it.ent.cancelGid; res.reactivated++; }
         arr.push(it.ent); doc.slots[key] = arr; dirty.add(wk + '_' + proId); placed = true;
         if (date !== it.x.date || key !== it.x.k) res.moved++;
