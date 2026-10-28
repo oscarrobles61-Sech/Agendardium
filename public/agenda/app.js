@@ -101,6 +101,14 @@ function monthAfter(date) {
 const tm = (h, m) => pad(h) + ':' + pad(m || 0);
 // Borradores de turnos: lo que se tipea al agendar queda guardado en este navegador (por persona, profesional y
 // horario) hasta confirmar el turno o descartarlo. No es un turno: no ocupa lugar ni lo ven los demás.
+// Franjas plegadas de la agenda (por profesional), recordadas en este navegador.
+const Folds = (() => {
+  let set = new Set(); try { set = new Set(JSON.parse(localStorage.getItem('agenda_franjas_plegadas') || '[]')); } catch (e) {}
+  return {
+    has: k => set.has(k),
+    toggle(k) { if (set.has(k)) set.delete(k); else set.add(k); try { localStorage.setItem('agenda_franjas_plegadas', JSON.stringify([...set])); } catch (e) {} }
+  };
+})();
 const DRAFT_KEY = 'agenda_borradores_v1';
 const Drafts = {
   all() {
@@ -612,7 +620,7 @@ function viewAgenda() {
   $('#view').innerHTML = `
     <div class="bar">
       <button class="btn ghost small" id="prev" aria-label="Semana anterior">‹</button>
-      <div class="wk-title" id="wkt">${weekLabel()}</div>
+      <div class="wkpick"><button type="button" class="wk-title" id="wkt" aria-haspopup="dialog" aria-expanded="false" title="Elegir otra semana">${weekLabel()} <span class="caret">▾</span></button><div id="wkcal" class="wkcal" hidden></div></div>
       <button class="btn ghost small" id="next" aria-label="Semana siguiente">›</button>
       <button class="btn ghost small" id="today">Hoy</button>
       ${S.proId && canEditAgenda(S.proId) ? '<button class="btn danger small" id="cancelag">Cancelar agenda</button><button class="btn ghost small" id="selmode">' + (S.sel ? 'Salir de selección' : 'Cancelar tratamiento') + '</button>' : ''}
@@ -631,8 +639,9 @@ function viewAgenda() {
     <div id="mdays" class="mdays"></div>
     <div id="grid" class="paper"></div>
     <p class="summary" id="sum"></p>
-    <div class="legend"><span><i></i>Primera sesión</span><span>✓ asistió</span><span>✗ faltó</span><span>○ sin marcar (tocá para marcar)</span><span>↻ recuperada en otra fecha</span><span>R recupero · S sobreturno</span></div>`;
+    <div class="legend"><span><i></i>Primera sesión</span><span><i class="fin"></i>Última sesión</span><span>✓ asistió</span><span>✗ faltó</span><span>○ sin marcar (tocá para marcar)</span><span>↻ recuperada en otra fecha</span><span>R recupero · S sobreturno</span></div>`;
   $('#prev').onclick = () => shiftWeek(-7);
+  bindWeekPicker();
   $('#next').onclick = () => shiftWeek(7);
   const ca = $('#cancelag'); if (ca) ca.onclick = openCancelModal;
   const sm = $('#selmode'); if (sm) sm.onclick = toggleSelect;
@@ -651,6 +660,42 @@ function viewAgenda() {
   renderRecoverBar();
   renderSelBar();
   renderGrid();
+}
+// Calendario mensual para saltar a otra semana (la agenda sigue mostrándose semana a semana).
+let calMonth = null;
+function weekCalHTML() {
+  const [y, m] = calMonth; const first = new Date(y, m, 1); const start = mondayOf(first); const today = todayStr();
+  let rows = '';
+  for (let w = 0; w < 6; w++) {
+    const mon = addDays(start, 7 * w); if (w > 0 && mon.getMonth() !== m && mon > first) break;
+    const wk = fmt(mon);
+    rows += `<tr class="${wk === S.week ? 'cur' : ''}" data-wk="${wk}">${[0, 1, 2, 3, 4, 5, 6].map(i => { const d = addDays(mon, i); const ds = fmt(d);
+      return `<td class="${d.getMonth() !== m ? 'out' : ''}${ds === today ? ' today' : ''}${isClosed(ds) ? ' hol' : ''}">${d.getDate()}</td>`; }).join('')}</tr>`;
+  }
+  return `<div class="wkc-head"><button type="button" class="btn ghost small" data-cm="-1" aria-label="Mes anterior">‹</button><b>${MONTHS[m][0].toUpperCase() + MONTHS[m].slice(1)} ${y}</b><button type="button" class="btn ghost small" data-cm="1" aria-label="Mes siguiente">›</button></div>
+    <table class="wkc"><thead><tr>${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>
+    <p class="hint" style="margin:6px 2px 0">Tocá un día para ver esa semana.</p>`;
+}
+function bindWeekPicker() {
+  const btn = $('#wkt'), cal = $('#wkcal'); if (!btn || !cal) return;
+  const close = () => { cal.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  btn.onclick = e => {
+    e.stopPropagation();
+    if (!cal.hidden) return close();
+    const w = parse(S.week); calMonth = [w.getFullYear(), w.getMonth()];
+    cal.innerHTML = weekCalHTML(); cal.hidden = false; btn.setAttribute('aria-expanded', 'true');
+  };
+  cal.onclick = e => {
+    e.stopPropagation();
+    const cm = e.target.closest('[data-cm]');
+    if (cm) { const d = new Date(calMonth[0], calMonth[1] + +cm.dataset.cm, 1); calMonth = [d.getFullYear(), d.getMonth()]; cal.innerHTML = weekCalHTML(); return; }
+    const td = e.target.closest('td'), tr = e.target.closest('[data-wk]');
+    if (td && tr) { S.week = tr.dataset.wk; const i = [...tr.children].indexOf(td); S.mobDay = (i + 1) % 7; close(); viewAgenda(); }
+  };
+  if (!bindWeekPicker.once) {
+    bindWeekPicker.once = true;
+    document.addEventListener('click', ev => { const c = $('#wkcal'); if (c && !c.hidden && !ev.target.closest('.wkpick')) { c.hidden = true; const b = $('#wkt'); if (b) b.setAttribute('aria-expanded', 'false'); } });
+  }
 }
 function shiftWeek(n) { S.week = fmt(addDays(parse(S.week), n)); viewAgenda(); }
 
@@ -706,7 +751,18 @@ function renderGrid() {
 
   const drafts = Drafts.all(); const draftAt = (date, h, m) => drafts[Drafts.key(S.proId, date, h, m)];
   const draftHTML = dr => `<span class="nm">${esc(dr.name || 'Sin nombre')}</span><span class="dtag">borrador</span>`;
+  // Franjas: horas seguidas de trabajo. Con más de una (ej. 8 a 12 y 17 a 20) cada franja se puede plegar.
+  const bands = []; hours.forEach(h => { const b = bands[bands.length - 1]; if (b && b.to === h) b.to = h + 1; else bands.push({ from: h, to: h + 1 }); });
+  const bandOf = h => bands.find(b => h >= b.from && h < b.to);
   hours.forEach(h => {
+    if (bands.length > 1) {
+      const b = bandOf(h), fk = S.proId + '|' + b.from, folded = Folds.has(fk);
+      if (h === b.from) {
+        const n = Object.entries(slots).filter(([k]) => { const kh = +k.split('_')[1]; return kh >= b.from && kh < b.to; }).reduce((a, [, arr]) => a + arr.filter(occupies).length, 0);
+        html += `<button type="button" class="fband${folded ? ' folded' : ''}" data-fold="${esc(fk)}" aria-expanded="${!folded}"><span class="chev">${folded ? '▸' : '▾'}</span>Franja de ${b.from} a ${b.to} h<small>${n} ${n === 1 ? 'turno' : 'turnos'} en la semana${folded ? ' · tocá para desplegar' : ''}</small></button>`;
+      }
+      if (folded) return;
+    }
     const step = med ? S.cfg.medMin : 60;
     const nrows = med ? Math.floor(60 / step) : Math.max(cap, ...days.map(d => (slots[slotKey(dateOf(d), h, null)] || []).length));
     html += `<div class="hb" style="grid-row:span ${nrows}">${h}<small>hs</small></div>`;
@@ -740,6 +796,7 @@ function renderGrid() {
 
   g.onclick = e => {
     if (S.justDragged) return;
+    const fb = e.target.closest('[data-fold]'); if (fb) { Folds.toggle(fb.dataset.fold); renderGrid(); return; }
     const phb = e.target.closest('[data-photo]'); if (phb) return pickPhoto(phb.dataset.photo);
     const ln = e.target.closest('.ln'); if (!ln || ln.classList.contains('off')) return;
     const date = ln.dataset.date, h = +ln.dataset.h, d = +ln.dataset.d, m = ln.dataset.m != null ? +ln.dataset.m : null;
@@ -818,6 +875,7 @@ function entryHTML(p, can) {
     if (isFinalSes(p) && !hasContinuation(pt, p.tid)) acts.unshift(['cont', 'Agendar continuación']);
   }
   if (pt) acts.push(['ficha', 'Ficha']);
+  else if (can && p.pid) acts.push(['mkficha', 'Crear ficha']); // turno de un paciente cuya ficha se borró
   return `<li class="${st === 'falto' || st === 'rec-done' ? 'dim' : ''}"><div class="pinfo"><b>${esc(pname(p))}</b>${tags.map(t => `<span class="tag ${t[1]}">${esc(t[0])}</span>`).join('')}
     ${info.length ? `<small>${info.map(esc).join(' · ')}</small>` : ''}</div>
     <div class="x">${acts.map(a => `<button class="btn ghost small" data-act="${a[0]}" data-id="${p.id}" ${a[0] === 'norec' ? 'disabled' : ''}>${esc(a[1])}</button>`).join('')}</div></li>`;
@@ -926,6 +984,12 @@ function openSlot(date, h, d, m, eid) {
     const act = b.dataset.act, id = b.dataset.id;
     const ent = slotData().find(p => p.id === id);
     if (act === 'ficha') { const pid = ent && ent.pid; closeModal(); if (pid) patientModal(pid); return; }
+    if (act === 'mkficha' && ent && ent.pid) {
+      // Se recrea con el mismo id, así quedan enlazados todos sus turnos.
+      try { await Store.setPatient(ent.pid, { name: pname(ent), phone: ent.phone || '', plans: {}, pros: [M.proId], created: Date.now(), updated: Date.now() }); const pid = ent.pid; closeModal(); toast('Ficha creada'); setTimeout(() => patientModal(pid), 400); }
+      catch (er) { toast('No se pudo crear la ficha.'); }
+      return;
+    }
     if (!canEditAgenda(M.proId)) return toast('No tenés permiso sobre esta agenda.');
     const key = slotKey(M.date, M.h, M.m);
     try {
@@ -1535,7 +1599,7 @@ function patientModal(pid) {
           ${mine ? `<textarea name="hn_${esc(n.id)}" rows="2" maxlength="1000" aria-label="Nota">${esc(n.text || '')}</textarea>` : `<p>${esc(n.text || '')}</p>`}</div>`; }).join('')}
       ${(p.history || []).length ? '<p class="hint">Para borrar una nota tuya, dejala vacía y guardá.</p>' : ''}`}
       <p class="err" id="ferr"></p>
-      <div class="actions"><button class="btn" type="submit">Guardar</button>${!isNew && isSec() ? '<button class="btn danger" type="button" data-delp>Eliminar paciente</button>' : ''}</div>
+      <div class="actions"><button class="btn" type="submit">Guardar</button>${!isNew && canEditPatient(p) ? '<button class="btn danger" type="button" data-delp>Eliminar paciente</button>' : ''}</div>
     </form>`);
   $('#modal').onclick = async e => {
     if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) return closeModal();
@@ -1543,8 +1607,24 @@ function patientModal(pid) {
     if (ad) { const v = $('#addprosel') && $('#addprosel').value; if (v && !prosState.includes(v)) { prosState.push(v); $('#prosBox').innerHTML = prosBoxHTML(); } return; }
     if (rm) { prosState = prosState.filter(x => x !== rm.dataset.rmpro); $('#prosBox').innerHTML = prosBoxHTML(); return; }
     if (e.target.closest('[data-delp]')) {
-      if (!(await confirmBox(`Se elimina la ficha de ${p.name} y su historial de tratamientos. Los turnos ya agendados quedan en la agenda.`, 'Eliminar'))) return;
-      try { await Store.delPatient(pid); toast('Paciente eliminado'); closeModal(); } catch (er) { toast('No se pudo eliminar.'); }
+      // Se quitan también sus turnos pendientes (desde hoy) de las agendas que puede editar quien borra.
+      const from = todayStr(), to = fmt(addDays(nowBA(), 400));
+      const pros = [...new Set([...(p.pros || []), ...Object.values(p.plans || {}).map(pl => pl.proId)])].filter(pr => pr && S.users[pr] && canEditAgenda(pr));
+      const pending = {};
+      for (const pr of pros) {
+        const by = await fetchEntries(pr, from, to); const items = [];
+        Object.entries(by).forEach(([date, list]) => list.forEach(x => { if (x.pid === pid && delOk(x.status || 'prog')) items.push({ eid: x.id, date, key: x._k }); }));
+        if (items.length) pending[pr] = items;
+      }
+      const n = Object.values(pending).reduce((a, l) => a + l.length, 0);
+      const msg = `Se elimina la ficha de ${p.name} con sus tratamientos y notas.`
+        + (n ? ` También se ${n === 1 ? 'quita su turno pendiente' : 'quitan sus ' + n + ' turnos pendientes'} desde hoy.` : '')
+        + ' Las sesiones ya realizadas y las faltas quedan en la agenda como registro.';
+      if (!(await confirmBox(msg, 'Eliminar'))) return;
+      try {
+        for (const [pr, items] of Object.entries(pending)) await deleteSessions(pr, items, false);
+        await Store.delPatient(pid); delete S.patients[pid]; toast('Paciente eliminado'); closeModal();
+      } catch (er) { console.error(er); toast((er && er.status === 403 && er.message) || 'No se pudo eliminar.'); }
     }
   };
   $('#pf2').onsubmit = async e => {

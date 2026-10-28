@@ -88,6 +88,21 @@ input[type=text],input[type=password],input[type=number],input[type=tel],select,
 .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
 .bar .grow{flex:1}
 .wk-title{font-family:var(--font-d);font-weight:800;font-size:20px;min-width:190px;text-align:center}
+button.wk-title{background:none;border:1px solid transparent;border-radius:10px;color:var(--ink);padding:4px 10px;cursor:pointer}
+button.wk-title:hover,button.wk-title[aria-expanded="true"]{border-color:var(--line2);background:var(--card)}
+.wk-title .caret{font-size:.6em;color:var(--muted)}
+.wkpick{position:relative;display:flex}
+.wkcal{position:absolute;top:calc(100% + 6px);left:50%;transform:translateX(-50%);z-index:30;background:var(--surface);border:1px solid var(--line2);border-radius:14px;box-shadow:0 12px 32px rgba(0,0,0,.18);padding:10px;width:300px;max-width:calc(100vw - 32px)}
+.wkcal[hidden]{display:none}
+.wkc-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.wkc{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+.wkc th{font-size:11px;color:var(--muted);font-weight:600;padding:4px 0}
+.wkc td{text-align:center;padding:7px 0;cursor:pointer;font-size:14px}
+.wkc tbody tr:hover td{background:var(--soft)}
+.wkc tr.cur td{background:var(--brand);color:var(--on-brand);font-weight:700}
+.wkc td.out{color:var(--muted);opacity:.6}
+.wkc td.hol{text-decoration:underline dotted}
+.wkc td.today{box-shadow:inset 0 0 0 2px var(--brand);border-radius:8px}
 .sel-pro{max-width:280px}
 .summary{color:var(--muted);font-size:13px;margin:8px 2px 0}
 .mdays{display:none;gap:6px;overflow-x:auto;padding-bottom:8px}
@@ -211,6 +226,7 @@ input[type=text],input[type=password],input[type=number],input[type=tel],select,
 .cell .fr{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:auto;padding:2px 4px 0}
 .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin:8px 2px 0}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;background:#FFEB3B;vertical-align:-2px;margin-right:4px}
+.legend i.fin{background:#81C784}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:0 0 12px}
 .stat{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 14px}
 .stat b{display:block;font-family:var(--font-d);font-size:28px;line-height:1.1}
@@ -289,6 +305,10 @@ input[type=text],input[type=password],input[type=number],input[type=tel],select,
 .ln .dtag{margin-left:auto;flex:none;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;border:1px dashed currentColor;border-radius:4px;padding:1px 5px}
 .draftnote{background:var(--soft);border:1px dashed var(--muted);border-radius:8px;padding:8px 10px}
 .ln.dim .nm{opacity:.5}
+.fband{grid-column:1/-1;display:flex;align-items:center;gap:10px;padding:8px 12px;border:0;border-top:2px solid var(--ink);background:var(--soft);color:var(--ink);font:inherit;font-weight:700;font-size:14px;text-align:left;cursor:pointer}
+.fband small{font-weight:500;color:var(--muted)}
+.fband .chev{width:14px}
+.fband:hover{filter:brightness(.97)}
 .ln.med{flex-wrap:wrap;font-size:19px}
 .ln .tm{font-size:12px;color:var(--muted);width:40px;flex:none;font-variant-numeric:tabular-nums}
 .sobchip{font-size:13px;background:var(--warn-soft);border-radius:99px;padding:1px 9px;white-space:nowrap}
