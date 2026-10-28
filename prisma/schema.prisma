@@ -250,13 +250,15 @@ model treatment_plans {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model user_schedules {
-  user_id   String
-  weekday   Int      @db.SmallInt
-  works     Boolean?
-  from_hour Int?     @db.SmallInt
-  to_hour   Int?     @db.SmallInt
-  extra     Json     @default("{}")
-  users     users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  user_id    String
+  weekday    Int      @db.SmallInt
+  works      Boolean?
+  from_hour  Int?     @db.SmallInt
+  to_hour    Int?     @db.SmallInt
+  from_hour2 Int?     @db.SmallInt
+  to_hour2   Int?     @db.SmallInt
+  extra      Json     @default("{}")
+  users      users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@id([user_id, weekday])
 }

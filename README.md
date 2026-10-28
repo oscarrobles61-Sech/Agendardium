@@ -25,7 +25,7 @@ Basadas en el `schema.sql` de referencia:
 | Tabla | Contenido |
 |---|---|
 | `app_config`, `holidays` | Configuración general y feriados cargados a mano |
-| `users`, `user_schedules` | Integrantes (con su `dni` en texto plano y sus `profiles`) y horario por día |
+| `users`, `user_schedules` | Integrantes (con su `dni` en texto plano y sus `profiles`) y horario por día, con 2ª franja opcional (`from_hour2`/`to_hour2`) |
 | `patients`, `patient_professionals`, `patient_notes` | Pacientes, sus profesionales y notas tipo historia clínica |
 | `treatment_plans`, `plan_day_patterns` | Tratamientos (con su tipo de sesión) y su patrón de días/horas |
 | `agenda_weeks`, `sessions`, `agenda_blocks` | Semanas de agenda por profesional, cada turno y los bloqueos de "Cancelar agenda" |
@@ -95,7 +95,7 @@ Cada profesional tiene sus **especialidades** (en Equipo). El tipo de sesión sa
 | Tipo | Especialidades |
 |---|---|
 | **Rehabilitación** | Miembro Superior, Miembro Inferior, Columna, Piso Pélvico, Neuro, Terapia Ocupacional, Psicología, Fonoaudiología |
-| **Entrenamiento** | Gimnasio, Pilates |
+| **Entrenamiento** | Gimnasio, Pilates, Terapia Cardiorrespiratoria |
 | **Práctica diferenciada** | Osteopatía, Vestibular, Nutrición, Evaluación Funcional, Piso Pélvico, ATM, RPG |
 
 Al agendar un tratamiento nuevo solo aparecen las especialidades de ese profesional (si no tiene ninguna cargada,
