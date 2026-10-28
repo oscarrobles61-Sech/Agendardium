@@ -108,6 +108,15 @@ se usan las de su profesión: por ejemplo Fonoaudiología o Nutrición; si tampo
 
 Se guarda en `treatment_plans` (`session_type`, `specialty`, `training_frequency`, `practice`, `until_date`).
 
+## Primera sesión, restantes y continuación
+
+- En el alta de un paciente, **Agendar solo la primera sesión** carga únicamente ese turno; el tratamiento queda con la
+  cantidad prevista. Al tocar la sesión en la agenda aparece **Agendar las N restantes** (mismos días, horario,
+  feriados y cupos de siempre).
+- La **última sesión** del tratamiento (aunque sea un recupero) se pinta de verde. Al tocarla aparece
+  **Agendar continuación**: se elige la cantidad y los días, y se crea un tratamiento nuevo enlazado al anterior
+  (en entrenamiento, el mes siguiente del pase).
+
 ## Ingreso con DNI
 
 - Cada perfil entra escribiendo su DNI (se guarda en texto plano en `users.dni` y se compara sin puntos ni espacios).

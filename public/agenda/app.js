@@ -679,7 +679,7 @@ function renderGrid() {
     const mk = mkOf(e);
     return `<span class="nm">${esc(pname(e))}</span>${e.n ? `<sup>${e.n}</sup>` : ''}${e.rec ? '<sup class="r">R</sup>' : ''}${e.sob ? '<sup class="r">S</sup>' : ''}<span class="mk ${mk[1]}" data-mk="${e.id}" role="button" aria-label="Asistencia: tocá para cambiar">${mk[0]}</span>`;
   };
-  const entryCls = e => { const st = e.status || 'prog'; return (e.n === 1 && st !== 'falto' && st !== 'rec-done' && st !== 'cancel' ? ' first' : '') + (st === 'falto' || st === 'rec-done' || st === 'cancel' ? ' dim' : '') + (S.sel && S.sel.items[e.id] ? ' selected' : '') + (S.sel && !delOk(st) ? ' nosel' : ''); };
+  const entryCls = e => { const st = e.status || 'prog'; return (isFirstSes(e) ? ' first' : isFinalSes(e) ? ' fin' : '') + (st === 'falto' || st === 'rec-done' || st === 'cancel' ? ' dim' : '') + (S.sel && S.sel.items[e.id] ? ' selected' : '') + (S.sel && !delOk(st) ? ' nosel' : ''); };
 
   let html = title + `<div class="pscroll"><div class="psheet${S.fullWeek ? ' fullw' : ' one'}" style="--n:${days.length}"><div class="hcell">HORARIO</div>`;
   days.forEach(d => { const dt = addDays(mon, ORDER.indexOf(d));
@@ -753,15 +753,21 @@ function slotData() {
   return (doc && doc.slots && doc.slots[slotKey(M.date, M.h, M.m)]) || [];
 }
 
+// Primera sesión (amarillo) y última sesión del tratamiento (verde). Una continuación no vuelve a marcar la primera.
+const liveSt = p => { const st = p.status || 'prog'; return st !== 'falto' && st !== 'rec-done' && st !== 'cancel'; };
+const isFirstSes = p => p.n === 1 && liveSt(p) && !(planOf(p) || {}).cont;
+const isFinalSes = p => { const pl = planOf(p); return !!(pl && pl.total > 1 && p.n === pl.total && (pl.placed || 0) >= pl.total && liveSt(p)); };
+const hasContinuation = (pt, tid) => Object.values((pt && pt.plans) || {}).some(x => x.cont === tid);
 function prowHTML(p) {
-  const st = p.status || 'prog'; const first = p.n === 1 && st !== 'falto' && st !== 'rec-done';
+  const st = p.status || 'prog'; const first = isFirstSes(p);
   const mk = st === 'asist' ? '✓' : st === 'falto' ? '✗' : st === 'rec-done' ? '↻' : (p.rec ? 'R' : '');
-  return `<span class="prow${first ? ' first' : ''}${st === 'falto' || st === 'rec-done' ? ' dim' : ''}"><span class="nm">${esc(pname(p))}</span>${p.n ? `<sup>${p.n}</sup>` : ''}${p.sob ? '<sup>S</sup>' : ''}<span class="mk">${mk}</span></span>`;
+  return `<span class="prow${first ? ' first' : ''}${isFinalSes(p) ? ' fin' : ''}${st === 'falto' || st === 'rec-done' ? ' dim' : ''}"><span class="nm">${esc(pname(p))}</span>${p.n ? `<sup>${p.n}</sup>` : ''}${p.sob ? '<sup>S</sup>' : ''}<span class="mk">${mk}</span></span>`;
 }
 function entryHTML(p, can) {
   const pt = pat(p), pl = planOf(p), st = p.status || 'prog';
   const tags = [];
-  if (p.n === 1 && st !== 'falto' && st !== 'rec-done' && st !== 'cancel') tags.push(['1ª sesión', 'first']);
+  if (isFirstSes(p)) tags.push(['1ª sesión', 'first']);
+  if (isFinalSes(p)) tags.push(['Última sesión', 'fin']);
   if (p.sob) tags.push(['Sobreturno', '']);
   if (p.rec) tags.push(['Recupero', '']);
   if (st === 'asist') tags.push(['Asistió', 'ok']);
@@ -784,6 +790,9 @@ function entryHTML(p, can) {
     if (st !== 'rec-done') acts.push(['move', 'Reagendar']);
     acts.push(['del', 'Quitar']);
     if (st === 'prog' && pl && pl.total > 1) acts.push(['canctrat', 'Cancelar tratamiento']);
+    const left = pl && pl.status === 'activo' ? pl.total - (pl.placed || 0) : 0;
+    if (left > 0 && liveSt(p)) acts.unshift(['rest', `Agendar ${left === 1 ? 'la sesión restante' : 'las ' + left + ' restantes'}`]);
+    if (isFinalSes(p) && !hasContinuation(pt, p.tid)) acts.unshift(['cont', 'Agendar continuación']);
   }
   if (pt) acts.push(['ficha', 'Ficha']);
   return `<li class="${st === 'falto' || st === 'rec-done' ? 'dim' : ''}"><div class="pinfo"><b>${esc(pname(p))}</b>${tags.map(t => `<span class="tag ${t[1]}">${esc(t[0])}</span>`).join('')}
@@ -872,7 +881,7 @@ function openSlot(date, h, d, m, eid) {
         <div class="chips">${days.map(x => `<label class="chip"><input type="checkbox" name="d" value="${x}" ${x === d ? 'checked' : ''} ${works(pro, x, h) ? '' : 'disabled'}><span>${DAYS_S[x]}</span></label>`).join('')}</div>
         <small id="prev"></small></div>
       <label class="fld"><span>Nota <small>(opcional)</small></span><input type="text" name="note" maxlength="120"></label>
-      <button class="btn" type="submit">${taken ? 'Asignar sobreturno' : 'Agendar'}</button>
+      <div class="actions"><button class="btn" type="submit">${taken ? 'Asignar sobreturno' : 'Agendar'}</button><button class="btn ghost" type="button" data-firstonly>Agendar solo la primera sesión</button></div>
     </form>` : ''}`);
 
   $('#modal').onclick = async e => {
@@ -914,6 +923,7 @@ function openSlot(date, h, d, m, eid) {
       else if (act === 'rec' && ent) startRecover(ent, key);
       else if (act === 'move' && ent) startMove(ent, key);
       else if (act === 'autores' && ent) { const pr = M.proId, only = { pid: ent.pid, tid: ent.tid }; closeModal(); await runAutoReschedule([pr], only); }
+      else if ((act === 'rest' || act === 'cont') && ent) seriesModal(act, ent, { proId: M.proId, date: M.date, h: M.h, m: M.m });
       else if (act === 'sob') openSlot(M.date, M.h, parse(M.date).getDay(), M.m, null);
     } catch (er) { toast('No se pudo guardar el cambio.'); }
   };
@@ -1009,8 +1019,11 @@ function openSlot(date, h, d, m, eid) {
   });
   syncType(); updatePrev();
 
+  let firstOnly = false;
+  af.querySelector('[data-firstonly]').onclick = () => { firstOnly = true; af.requestSubmit(); };
   af.onsubmit = async e => {
     e.preventDefault();
+    const only = firstOnly; firstOnly = false;
     if (!canEditAgenda(M.proId)) return toast('No tenés permiso sobre esta agenda.');
     const name = f.name.value.trim(); if (!name) return;
     const chosen = [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
@@ -1022,8 +1035,9 @@ function openSlot(date, h, d, m, eid) {
     const btn = af.querySelector('button[type=submit]'); btn.disabled = true;
     try {
       const r = await addSessions({ proId: M.proId, startDate: M.date, h: M.h, m: M.m, sob: !!(so && so.checked), days: chosen, count, pid: M.pid, tid: M.tid,
-        name, dni: f.dni.value.trim(), phone: f.phone.value.trim(), insurance: f.insurance.value.trim(), affiliate: f.affiliate.value.trim(), dx: f.dx.value.trim(), note: f.note.value.trim(), type, spec, freq, practice, until: training ? monthAfter(M.date) : null });
+        name, dni: f.dni.value.trim(), phone: f.phone.value.trim(), insurance: f.insurance.value.trim(), affiliate: f.affiliate.value.trim(), dx: f.dx.value.trim(), note: f.note.value.trim(), type, spec, freq, practice, until: training ? monthAfter(M.date) : null, firstOnly: only });
       if (!r.ok) toast('No se pudo agendar: los turnos están completos, fuera del horario o en días cerrados.');
+      else if (only) toast('Primera sesión agendada. Tocala en la agenda para agendar las restantes.');
       else toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
       if (r.ok) { af.reset(); unlink(); syncType(); f.count.value = med ? 1 : 10; updatePrev(); f.name.focus(); }
     } catch (er) { console.error(er); toast('No se pudo guardar. Revisá tu permiso de edición.'); }
@@ -1043,11 +1057,19 @@ async function addSessions(o) {
   if (!pt.pros.includes(o.proId)) pt.pros.push(o.proId);
   let tid = o.tid; let pl = tid && pt.plans[tid]; let count = o.count;
   if (pl) { count = Math.min(count, pl.total - pl.placed); if (count <= 0) return { ok: 0, skipped: 0 }; if (o.dx) pl.dx = o.dx; }
-  else { tid = 't' + uid(); pl = pt.plans[tid] = { proId: o.proId, total: count, placed: 0, recUsed: 0, dx: o.dx || '', status: 'activo', type: o.type || 'rehabilitacion', ...(o.spec ? { spec: o.spec } : {}), ...(o.freq ? { freq: o.freq } : {}), ...(o.practice ? { practice: o.practice } : {}), ...(o.until ? { until: o.until } : {}), start: o.startDate, created: now, pat: Object.fromEntries(o.days.map(d => [d, { h: o.h, m: med ? o.m : null }])) }; }
-  // Entrenamiento: todas las fechas de los días elegidos dentro del mes (lo que no entra se saltea).
-  if (o.until && !o.tid) count = 999;
-  const cands = o.until && !o.tid ? [...candidates(o.startDate, o.days, 6)].filter(x => x.date < o.until)
-    : count === 1 ? [{ d: parse(o.startDate).getDay(), date: o.startDate }] : candidates(o.startDate, o.days, weeksFor(count, o.days));
+  else { tid = 't' + uid(); pl = pt.plans[tid] = { proId: o.proId, total: count, placed: 0, recUsed: 0, dx: o.dx || '', status: 'activo', type: o.type || 'rehabilitacion', ...(o.spec ? { spec: o.spec } : {}), ...(o.freq ? { freq: o.freq } : {}), ...(o.practice ? { practice: o.practice } : {}), ...(o.until ? { until: o.until } : {}), ...(o.cont ? { cont: o.cont } : {}), start: o.startDate, created: now, pat: Object.fromEntries(o.days.map(d => [d, { h: o.h, m: med ? o.m : null }])) }; }
+  const fresh = !o.tid;
+  const monthDates = () => [...candidates(o.startDate, o.days, 6)].filter(x => x.date < pl.until);
+  let cands;
+  if (o.firstOnly) {
+    // Solo la primera sesión: el tratamiento queda con el total previsto y el resto se agenda después desde esa sesión.
+    if (fresh) pl.total = Math.max(1, pl.until ? monthDates().length : o.count);
+    count = 1; cands = [{ d: parse(o.startDate).getDay(), date: o.startDate }];
+  } else if (pl.until) {
+    // Entrenamiento: todas las fechas de los días elegidos dentro del mes (lo que no entra se saltea).
+    if (fresh) count = 999;
+    cands = monthDates();
+  } else cands = count === 1 ? [{ d: parse(o.startDate).getDay(), date: o.startDate }] : candidates(o.startDate, o.days, weeksFor(count, o.days));
   let ok = 0, skipped = 0, n = pl.placed, lastPlaced = '';
   let curWk = null, curDoc = null, curId = null, changed = false;
   const flush = async () => { if (curDoc && changed) await Store.setAgenda(curId, curDoc); changed = false; };
@@ -1065,9 +1087,58 @@ async function addSessions(o) {
     arr.push(entry); curDoc.slots[key] = arr; ok++; changed = true; if (date > lastPlaced) lastPlaced = date;
   }
   await flush();
-  if (o.until && !o.tid) pl.total = ok; // el pase del mes queda con las sesiones que se pudieron cargar
+  if (pl.until && !fresh && !o.firstOnly) pl.total = (pl.placed || 0) + ok; // restantes del pase: lo que entró
+  if (pl.until && fresh && !o.firstOnly) pl.total = ok; // el pase del mes queda con las sesiones que se pudieron cargar
   if (ok > 0) { pl.placed += ok; if (lastPlaced > (pl.lastDate || '')) pl.lastDate = lastPlaced; await Store.setPatient(pid, pt); }
   return { ok, skipped, pid };
+}
+
+/* ---- sesiones restantes y continuación, desde una sesión ya agendada ---- */
+async function seriesModal(kind, ent, ctx) {
+  const pt = await Store.getPatient(ent.pid); const pl = pt && pt.plans && pt.plans[ent.tid];
+  if (!pt || !pl) return toast('No se encontró el tratamiento.');
+  const pro = S.users[ctx.proId]; const med = isMed(pro); const training = pl.type === 'entrenamiento';
+  const left = pl.total - (pl.placed || 0);
+  // Restantes: desde el día siguiente a la última sesión agendada. Continuación: desde el día siguiente a esta sesión
+  // (en entrenamiento, el mes que sigue al pase actual).
+  const after = d => fmt(addDays(parse(d), 1));
+  const base = kind === 'rest' ? [ctx.date, pl.lastDate || ''].sort().pop() : ctx.date;
+  const start = kind === 'cont' && training && pl.until && pl.until > ctx.date ? pl.until : after(base);
+  const until = training ? (kind === 'rest' ? pl.until : monthAfter(start)) : null;
+  const patDays = Object.keys(pl.pat || {}).map(Number);
+  const days = ORDER.filter(x => S.cfg.days.includes(x));
+  const pre = patDays.length ? patDays : [parse(ctx.date).getDay()];
+  const unit = med ? 'consultas' : 'sesiones';
+  const title = kind === 'rest' ? 'Agendar sesiones restantes' : 'Agendar continuación';
+  openModal(`<button class="btn ghost small close" data-close>Cerrar</button><h2>${title}</h2>
+    <p class="sub">${esc(pt.name)} · ${esc(planTypeText(pl) || pl.dx || 'Tratamiento')} · ${med ? tm(ctx.h, ctx.m) : hh(ctx.h)} h · desde el ${esc(labelDate(start))}</p>
+    <form id="sf" autocomplete="off">
+      ${training ? `<p class="hint">${kind === 'rest' ? 'Se cargan las sesiones que faltan del pase' : 'Se carga el mes siguiente del pase'} (${esc(TRAINING_FREQ[pl.freq] || '')}), hasta el ${esc(labelDate(fmt(addDays(parse(until), -1))))}.</p>`
+        : `<label class="fld"><span>Cantidad de ${unit}</span><input type="number" name="count" min="1" max="${kind === 'rest' ? left : pl.type === 'practica' ? 999 : 60}" value="${kind === 'rest' ? left : pl.total}" inputmode="numeric" style="max-width:140px"></label>`}
+      <div class="fld"><span>Días de la semana</span>
+        <div class="chips">${days.map(x => `<label class="chip"><input type="checkbox" name="d" value="${x}" ${pre.includes(x) ? 'checked' : ''} ${works(pro, x, ctx.h) ? '' : 'disabled'}><span>${DAYS_S[x]}</span></label>`).join('')}</div></div>
+      <button class="btn" type="submit">${title}</button>
+    </form>`);
+  $('#modal').onclick = e => { if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) closeModal(); };
+  const f = $('#sf');
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const chosen = [...f.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+    if (!chosen.length) return toast('Elegí al menos un día.');
+    if (training && pl.freq && pl.freq !== 'libre' && chosen.length !== +pl.freq) return toast(`Entrenamiento ${TRAINING_FREQ[pl.freq]}: elegí ${pl.freq} ${pl.freq === '1' ? 'día' : 'días'} de la semana.`);
+    const count = training ? 999 : Math.max(1, Math.min(+f.count.max, parseInt(f.count.value, 10) || 1));
+    const btn = f.querySelector('button[type=submit]'); btn.disabled = true;
+    const common = { proId: ctx.proId, startDate: start, h: ctx.h, m: ctx.m, days: chosen, count, pid: ent.pid,
+      name: pt.name, dni: pt.dni, phone: pt.phone, insurance: pt.insurance, affiliate: pt.affiliate, note: '' };
+    try {
+      const r = kind === 'rest'
+        ? await addSessions({ ...common, tid: ent.tid })
+        : await addSessions({ ...common, tid: null, cont: ent.tid, dx: pl.dx, type: pl.type, spec: pl.spec, freq: pl.freq, practice: pl.practice, until });
+      if (!r.ok) { toast('No se pudo agendar: los turnos están completos, fuera del horario o en días cerrados.'); btn.disabled = false; return; }
+      closeModal();
+      toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
+    } catch (er) { console.error(er); toast('No se pudo guardar. Revisá tu permiso de edición.'); btn.disabled = false; }
+  };
 }
 
 async function adjustPlan(pid, tid, dPlaced, dRec, finalize) {
@@ -1685,7 +1756,7 @@ function drawMonth() {
     acum += real; T.prog += prog; T.real += real; T.falt += falt; T.pend += pend; T.rec += rec;
     const off = (!S.cfg.days.includes(dow) || isClosed(date)) && !list.length; const hol = holidayOf(date);
     rows += `<tr class="${off ? 'off' : ''} ${date === todayS ? 'today' : ''}" data-date="${date}"><td><b>${day}</b> <small>${DAYS_S[dow]}</small>${hol ? `<small class="hl2">${esc(hol.name)}</small>` : ''}</td><td>${prog || '·'}</td><td>${real || '·'}</td><td>${falt || '·'}</td><td>${rec || '·'}</td><td><b>${acum}</b></td>${showF ? `<td>${fact ? money(fact) : '·'}</td>` : ''}</tr>`;
-    if (S.mdet && list.length) rows += `<tr class="det"><td colspan="${cols}">${list.map(p => { const st = p.status || 'prog'; const mk = st === 'asist' ? '✓' : st === 'falto' ? '✗' : st === 'rec-done' ? '↻' : '·'; return `<span class="dp${p.n === 1 && st !== 'falto' && st !== 'rec-done' ? ' first' : ''}">${esc(pname(p))}${p.n ? `<sup>${p.n}</sup>` : ''} ${mk}</span>`; }).join('')}</td></tr>`;
+    if (S.mdet && list.length) rows += `<tr class="det"><td colspan="${cols}">${list.map(p => { const st = p.status || 'prog'; const mk = st === 'asist' ? '✓' : st === 'falto' ? '✗' : st === 'rec-done' ? '↻' : '·'; return `<span class="dp${isFirstSes(p) ? ' first' : isFinalSes(p) ? ' fin' : ''}">${esc(pname(p))}${p.n ? `<sup>${p.n}</sup>` : ''} ${mk}</span>`; }).join('')}</td></tr>`;
   }
   const C = monthCompute();
   const canBill = isSec() || MD.proId === S.me; const dis = canBill ? '' : 'disabled';
@@ -2253,7 +2324,7 @@ function renderReminders() {
   const act = x => (x.p.status || 'prog') === 'prog' || x.p.status === 'asist';
   const hoy = items.filter(x => x.date === today && act(x));
   const lim = fmt(addDays(nowBA(), 3));
-  const ingresos = items.filter(x => x.p.n === 1 && !x.p.rec && (x.p.status || 'prog') === 'prog' && x.date <= lim).sort((a, b) => a.date.localeCompare(b.date) || a.h - b.h || a.m - b.m);
+  const ingresos = items.filter(x => x.p.n === 1 && !(planOf(x.p) || {}).cont && !x.p.rec && (x.p.status || 'prog') === 'prog' && x.date <= lim).sort((a, b) => a.date.localeCompare(b.date) || a.h - b.h || a.m - b.m);
   const groups = {};
   items.forEach(x => { const p = x.p; if (!p.pid || !p.tid || (p.status || 'prog') !== 'prog') return; (groups[p.pid + '|' + p.tid] = groups[p.pid + '|' + p.tid] || { pid: p.pid, tid: p.tid, list: [] }).list.push(x); });
   const N = S.cfg.endReminder;
