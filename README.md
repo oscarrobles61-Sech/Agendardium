@@ -113,9 +113,16 @@ Se guarda en `treatment_plans` (`session_type`, `specialty`, `training_frequency
 - En el alta de un paciente, **Agendar solo la primera sesión** carga únicamente ese turno; el tratamiento queda con la
   cantidad prevista. Al tocar la sesión en la agenda aparece **Agendar las N restantes** (mismos días, horario,
   feriados y cupos de siempre).
-- La **última sesión** del tratamiento (aunque sea un recupero) se pinta de verde. Al tocarla aparece
+- La **última sesión** del tratamiento (la que llega al total, aunque sea un recupero) se pinta de verde con la marca FIN. Al tocarla aparece
   **Agendar continuación**: se elige la cantidad y los días, y se crea un tratamiento nuevo enlazado al anterior
   (en entrenamiento, el mes siguiente del pase).
+
+## Borradores de turnos
+
+Lo que se escribe en el formulario de un turno se guarda solo como **borrador** en ese navegador (por persona,
+profesional y horario). Aparece en gris en la grilla con la etiqueta "borrador": no ocupa lugar ni lo ven los demás.
+Al volver a tocar ese horario se recuperan los datos; al confirmar, el formulario se cierra y el borrador se borra.
+Los borradores de días pasados se descartan solos.
 
 ## Ingreso con DNI
 

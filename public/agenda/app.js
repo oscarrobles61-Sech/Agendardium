@@ -99,6 +99,20 @@ function monthAfter(date) {
   return fmt(new Date(y, m, Math.min(d, last)));
 }
 const tm = (h, m) => pad(h) + ':' + pad(m || 0);
+// Borradores de turnos: lo que se tipea al agendar queda guardado en este navegador (por persona, profesional y
+// horario) hasta confirmar el turno o descartarlo. No es un turno: no ocupa lugar ni lo ven los demás.
+const DRAFT_KEY = 'agenda_borradores_v1';
+const Drafts = {
+  all() {
+    let a = {}; try { a = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}') || {}; } catch (e) {}
+    const today = fmt(nowBA()); // los de días pasados se descartan solos
+    for (const k of Object.keys(a)) if ((k.split('|')[2] || '').slice(0, 10) < today) delete a[k];
+    return a;
+  },
+  key: (proId, date, h, m) => [S.me, proId, slotKey(date, h, m)].join('|'),
+  get(k) { return this.all()[k] || null; },
+  set(k, v) { const a = this.all(); if (v) a[k] = v; else delete a[k]; try { localStorage.setItem(DRAFT_KEY, JSON.stringify(a)); } catch (e) {} }
+};
 const slotKey = (date, h, m) => m == null ? date + '_' + h : date + '_' + h + '_' + m;
 
 /* ================= almacenamiento ================= */
@@ -284,7 +298,10 @@ function openModal(html) {
   const f = $('#modal input:not([type=checkbox]):not([disabled]), #modal select');
   if (f && window.matchMedia('(min-width:721px)').matches) f.focus();
 }
-function closeModal() { $('#modal').innerHTML = ''; M = null; }
+function closeModal() {
+  const redraw = M && M.draftChanged; $('#modal').innerHTML = ''; M = null;
+  if (redraw && S.tab === 'agenda') renderView(true); // muestra u oculta el borrador en la grilla
+}
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { if ($('#dialog').innerHTML) $('#dialog').innerHTML = ''; else closeModal(); } });
 $('#modal').addEventListener('click', e => {
   if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) closeModal();
@@ -677,7 +694,7 @@ function renderGrid() {
   const mkOf = e => { const st = e.status || 'prog'; return st === 'asist' ? ['✓', 'ok'] : st === 'falto' ? ['✗', 'no'] : st === 'rec-done' ? ['↻', ''] : st === 'cancel' ? ['⊘', 'cx'] : ['○', 'pend']; };
   const entryInner = e => {
     const mk = mkOf(e);
-    return `<span class="nm">${esc(pname(e))}</span>${e.n ? `<sup>${e.n}</sup>` : ''}${e.rec ? '<sup class="r">R</sup>' : ''}${e.sob ? '<sup class="r">S</sup>' : ''}<span class="mk ${mk[1]}" data-mk="${e.id}" role="button" aria-label="Asistencia: tocá para cambiar">${mk[0]}</span>`;
+    return `<span class="nm">${esc(pname(e))}</span>${e.n ? `<sup>${e.n}</sup>` : ''}${e.rec ? '<sup class="r">R</sup>' : ''}${e.sob ? '<sup class="r">S</sup>' : ''}${isFinalSes(e) ? '<sup class="fin">FIN</sup>' : ''}<span class="mk ${mk[1]}" data-mk="${e.id}" role="button" aria-label="Asistencia: tocá para cambiar">${mk[0]}</span>`;
   };
   const entryCls = e => { const st = e.status || 'prog'; return (isFirstSes(e) ? ' first' : isFinalSes(e) ? ' fin' : '') + (st === 'falto' || st === 'rec-done' || st === 'cancel' ? ' dim' : '') + (S.sel && S.sel.items[e.id] ? ' selected' : '') + (S.sel && !delOk(st) ? ' nosel' : ''); };
 
@@ -686,6 +703,8 @@ function renderGrid() {
     const hol = holidayOf(fmt(dt));
     html += `<div class="hcell${hid(d)}${fmt(dt) === todayS ? ' today' : ''}">${DAYS[d].toUpperCase()}<span>${dt.getDate()}</span>${hol ? `<small class="hl" title="${esc(hol.name)}">${esc(HOL_TYPES[hol.type] || 'Feriado')}</small>` : ''}</div>`; });
 
+  const drafts = Drafts.all(); const draftAt = (date, h, m) => drafts[Drafts.key(S.proId, date, h, m)];
+  const draftHTML = dr => `<span class="nm">${esc(dr.name || 'Sin nombre')}</span><span class="dtag">borrador</span>`;
   hours.forEach(h => {
     const step = med ? S.cfg.medMin : 60;
     const nrows = med ? Math.floor(60 / step) : Math.max(cap, ...days.map(d => (slots[slotKey(dateOf(d), h, null)] || []).length));
@@ -704,11 +723,13 @@ function renderGrid() {
         if (med) {
           const reg = arr.find(p => !p.sob && occupies(p)) || arr.find(p => !p.sob);
           const sobs = arr.filter(p => p.sob && occupies(p));
-          html += `<div class="${base}${reg ? entryCls(reg) : ' empty'}" ${data}${reg ? ` data-eid="${reg.id}"` : ''} ${reg || r === 0 ? 'tabindex="0"' : ''}><span class="tm">${tm(h, m)}</span>${reg ? entryInner(reg) : '<span class="plus">+</span>'}${sobs.map(p => `<span class="sobchip" data-eid="${p.id}">S: ${esc(pname(p))}</span>`).join('')}</div>`;
+          const dr = !reg && open && draftAt(date, h, m);
+          html += `<div class="${base}${reg ? entryCls(reg) : dr ? ' draft' : ' empty'}" ${data}${reg ? ` data-eid="${reg.id}"` : ''} ${reg || r === 0 ? 'tabindex="0"' : ''}><span class="tm">${tm(h, m)}</span>${reg ? entryInner(reg) : dr ? draftHTML(dr) : '<span class="plus">+</span>'}${sobs.map(p => `<span class="sobchip" data-eid="${p.id}">S: ${esc(pname(p))}</span>`).join('')}</div>`;
         } else {
           const e = arr[r];
           if (!e && !open) { html += `<div class="${base} off"></div>`; return; }
-          html += `<div class="${base}${e ? entryCls(e) : ' empty'}" ${data}${e ? ` data-eid="${e.id}"` : ''} ${e || r === arr.length ? 'tabindex="0"' : ''}>${e ? entryInner(e) : (open ? '<span class="plus">+</span>' : '')}</div>`;
+          const dr = !e && open && r === arr.length && draftAt(date, h, null);
+          html += `<div class="${base}${e ? entryCls(e) : dr ? ' draft' : ' empty'}" ${data}${e ? ` data-eid="${e.id}"` : ''} ${e || r === arr.length ? 'tabindex="0"' : ''}>${e ? entryInner(e) : dr ? draftHTML(dr) : (open ? '<span class="plus">+</span>' : '')}</div>`;
         }
       });
     }
@@ -756,7 +777,8 @@ function slotData() {
 // Primera sesión (amarillo) y última sesión del tratamiento (verde). Una continuación no vuelve a marcar la primera.
 const liveSt = p => { const st = p.status || 'prog'; return st !== 'falto' && st !== 'rec-done' && st !== 'cancel'; };
 const isFirstSes = p => p.n === 1 && liveSt(p) && !(planOf(p) || {}).cont;
-const isFinalSes = p => { const pl = planOf(p); return !!(pl && pl.total > 1 && p.n === pl.total && (pl.placed || 0) >= pl.total && liveSt(p)); };
+// Última sesión: la que llega al total del tratamiento, se haya recuperado o no (si se recuperó, la marcada es el recupero).
+const isFinalSes = p => { const pl = planOf(p); return !!(pl && pl.total > 1 && p.n >= pl.total && (p.status || 'prog') !== 'rec-done'); };
 const hasContinuation = (pt, tid) => Object.values((pt && pt.plans) || {}).some(x => x.cont === tid);
 function prowHTML(p) {
   const st = p.status || 'prog'; const first = isFirstSes(p);
@@ -859,6 +881,7 @@ function openSlot(date, h, d, m, eid) {
     ${M.eid ? histBlockHTML() : ''}
     ${!M.eid && can ? `<hr class="sep">
     <form id="af" autocomplete="off">
+      <p class="hint draftnote" id="draftnote" hidden>Borrador guardado: todavía no es un turno. Completá los datos y confirmá. <button type="button" class="btn ghost small" data-dropdraft>Descartar borrador</button></p>
       <div class="fld"><span>Paciente</span>
         <input type="text" name="name" required maxlength="80" placeholder="Buscar o escribir nombre y apellido">
         <div id="sug" class="sug"></div>
@@ -1019,6 +1042,31 @@ function openSlot(date, h, d, m, eid) {
   });
   syncType(); updatePrev();
 
+  // Borrador: se guarda con cada cambio y se recupera al volver a abrir este horario.
+  const dk = Drafts.key(M.proId, M.date, M.h, M.m); const note = $('#draftnote');
+  const FIELDS = ['name', 'dni', 'phone', 'insurance', 'affiliate', 'dx', 'note', 'count', 'stype', 'freq'];
+  const saveDraft = () => {
+    if (!M) return;
+    const v = { pid: M.pid, tid: M.tid, days: [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value), sob: !!(so && so.checked), ts: Date.now() };
+    FIELDS.forEach(k => { if (f[k]) v[k] = f[k].value; });
+    const typed = M.pid || ['name', 'dni', 'phone', 'insurance', 'affiliate', 'dx', 'note'].some(k => (v[k] || '').trim());
+    Drafts.set(dk, typed ? v : null); M.draftChanged = true; note.hidden = !typed;
+  };
+  const dr0 = Drafts.get(dk);
+  if (dr0) {
+    if (dr0.pid && S.patients[dr0.pid]) link(dr0.pid);
+    const ps = af.querySelector('[name=planSel]'); if (ps && dr0.tid && [...ps.options].some(o => o.value === dr0.tid)) { ps.value = dr0.tid; applyPlanSel(); }
+    FIELDS.forEach(k => { if (f[k] && dr0[k] != null && (k !== 'stype' || [...f.stype.options].some(o => o.value === dr0.stype))) f[k].value = dr0[k]; });
+    if (Array.isArray(dr0.days)) af.querySelectorAll('input[name=d]').forEach(x => { if (!x.disabled) x.checked = dr0.days.includes(+x.value); });
+    if (so) so.checked = !!dr0.sob;
+    syncType(); updatePrev(); note.hidden = false;
+  }
+  af.addEventListener('input', saveDraft); af.addEventListener('change', saveDraft);
+  af.addEventListener('click', e => {
+    if (e.target.closest('[data-sug]') || e.target.closest('[data-unlink]')) setTimeout(saveDraft);
+    if (e.target.closest('[data-dropdraft]')) { Drafts.set(dk, null); M.draftChanged = true; af.reset(); unlink(); syncType(); updatePrev(); note.hidden = true; }
+  });
+
   let firstOnly = false;
   af.querySelector('[data-firstonly]').onclick = () => { firstOnly = true; af.requestSubmit(); };
   af.onsubmit = async e => {
@@ -1039,7 +1087,7 @@ function openSlot(date, h, d, m, eid) {
       if (!r.ok) toast('No se pudo agendar: los turnos están completos, fuera del horario o en días cerrados.');
       else if (only) toast('Primera sesión agendada. Tocala en la agenda para agendar las restantes.');
       else toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
-      if (r.ok) { af.reset(); unlink(); syncType(); f.count.value = med ? 1 : 10; updatePrev(); f.name.focus(); }
+      if (r.ok) { Drafts.set(dk, null); M.draftChanged = true; closeModal(); return; } // turno confirmado: se cierra
     } catch (er) { console.error(er); toast('No se pudo guardar. Revisá tu permiso de edición.'); }
     btn.disabled = false;
   };
