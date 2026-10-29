@@ -562,3 +562,16 @@ input[type=date]{width:100%;min-height:44px;padding:9px 12px;border-radius:12px;
 .selact{display:flex;gap:8px;flex-wrap:wrap}
 .bar.filters{gap:14px}
 .bar.filters #pro{max-width:none;min-width:min(380px,100%)}
+
+/* sesiones de un tratamiento (Pacientes) */
+.sesbox{margin:0 0 10px;padding:10px 12px;border:0.5px solid var(--line);border-radius:12px;background:var(--soft)}
+.sesbox .sesh{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.sesbox .sesh small{color:var(--muted)}
+.sesrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+.sesrow:first-of-type{border-top:0}
+.sesrow .sn{font-weight:600;min-width:84px}
+.sesrow .sd{flex:1;min-width:130px}
+.sesrow .badge{margin-left:0}
+.sesrow small{color:var(--muted);min-width:44px;text-align:right}
+.sesrow.today{background:var(--ok-soft);border-radius:8px;padding-left:6px;padding-right:6px}
+.sesrow.miss .sd{color:var(--muted);font-style:italic}

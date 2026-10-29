@@ -240,10 +240,172 @@ const Store = (() => {
   };
 })();
 
+/* ================= deshacer (cada usuario deshace solo lo suyo) ================= */
+// Cada escritura sobre agenda, fichas o registro mensual guarda la diferencia exacta que produjo (qué turnos o campos
+// cambiaron). Al deshacer se aplica la inversa sobre el documento ACTUAL, y solo en lo que sigue igual a como quedó
+// después de la acción: si otra persona tocó ese mismo dato, no se pisa. Así lo que hicieron los demás no se ve afectado.
+// La pila es por usuario y se guarda en este navegador.
+const Undo = (() => {
+  const MAX = 30, TTL = 7 * 864e5, SNAP_MS = 60000;
+  const DELTA = ['placed', 'recUsed'];             // contadores: se corrigen sumando la diferencia, no pisando
+  const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+  const canon = v => Array.isArray(v) ? v.map(canon) : isObj(v) ? Object.fromEntries(Object.keys(v).sort().filter(k => v[k] != null).map(k => [k, canon(v[k])])) : v === undefined ? null : v;
+  const eq = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+  const idArr = a => a.every(x => isObj(x) && x.id != null);
+  const simple = a => a.every(x => x == null || typeof x !== 'object');
+  const LABELS = { agenda: 'Cambio en la agenda', patients: 'Cambio en la ficha del paciente', billing: 'Cambio en el registro mensual' };
+  const KEY = () => 'agenda_deshacer_v1:' + S.me;
+  let cur = null, busy = false; const snaps = {}; const listeners = new Set();
+
+  /* ---- diferencia entre dos versiones de un documento: lista de operaciones {p: ruta, b: antes, a: después} ---- */
+  function diff(a, b, path, ops) {
+    if (eq(a, b)) return;
+    if ((a == null || Array.isArray(a)) && (b == null || Array.isArray(b))) {
+      const A = a || [], B = b || [];
+      if (idArr(A) && idArr(B)) {                  // listas de turnos, notas, bloqueos: se comparan por id
+        const inB = new Map(B.map(x => [x.id, x])), inA = new Set(A.map(x => x.id));
+        A.forEach((x, i) => { const y = inB.get(x.id); if (y === undefined) ops.push({ p: [...path, { id: x.id }], b: x, i }); else diff(x, y, [...path, { id: x.id }], ops); });
+        B.forEach(y => { if (!inA.has(y.id)) ops.push({ p: [...path, { id: y.id }], a: y }); });
+        return;
+      }
+      if (simple(A) && simple(B)) {                // listas de valores sueltos (profesionales del paciente)
+        const sa = new Set(A.map(x => JSON.stringify(x))), sb = new Set(B.map(x => JSON.stringify(x)));
+        A.forEach(x => { if (!sb.has(JSON.stringify(x))) ops.push({ p: [...path, { v: x }], b: x }); });
+        B.forEach(y => { if (!sa.has(JSON.stringify(y))) ops.push({ p: [...path, { v: y }], a: y }); });
+        return;
+      }
+    }
+    if (isObj(a) && isObj(b)) {
+      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) { if (!path.length && k === 'updated') continue; diff(a[k], b[k], [...path, k], ops); }
+      return;
+    }
+    ops.push({ p: path, b: a == null ? undefined : a, a: b == null ? undefined : b });
+  }
+  function docChange(before, after) {
+    if (before == null && after == null) return null;
+    if (after == null) return { k: 'del', before };
+    let base = null;
+    if (before == null) {
+      if (after.week && after.proId) base = { week: after.week, proId: after.proId, slots: {} };
+      else if (after.proId && after.month) base = { proId: after.proId, month: after.month };
+      else return { k: 'new', after };
+    }
+    const ops = []; diff(base || before, after, [], ops);
+    return ops.length ? Object.assign({ k: 'ops', ops }, base ? { base } : {}) : null;
+  }
+
+  /* ---- aplicar la inversa de una operación sobre el documento actual ---- */
+  function applyOp(doc, op) {
+    let t = doc; const P = op.p;
+    for (let i = 0; i < P.length - 1; i++) {
+      const s = P[i], nx = P[i + 1];
+      if (typeof s === 'string') {
+        if (!isObj(t)) return false;
+        if (t[s] == null) { if (op.b === undefined) return false; t[s] = typeof nx === 'string' ? {} : []; }
+        t = t[s];
+      } else if (s.id !== undefined) {
+        if (!Array.isArray(t)) return false;
+        t = t.find(x => x && x.id === s.id); if (!t) return false;
+      } else return false;
+    }
+    const last = P[P.length - 1];
+    if (typeof last === 'string') {
+      if (!isObj(t)) return false;
+      const v = t[last];
+      if (!eq(v, op.a)) {
+        if (DELTA.includes(last) && typeof op.a === 'number' && typeof op.b === 'number' && typeof v === 'number') { t[last] = Math.max(0, v + op.b - op.a); return true; }
+        return false;
+      }
+      if (op.b === undefined) delete t[last]; else t[last] = clone(op.b);
+      return true;
+    }
+    if (!Array.isArray(t)) return false;
+    const idx = last.id !== undefined ? t.findIndex(x => x && x.id === last.id) : t.findIndex(x => eq(x, last.v));
+    if (op.a === undefined) {                       // se había quitado: se vuelve a poner
+      if (idx >= 0) return false;
+      t.splice(Math.min(op.i == null ? t.length : op.i, t.length), 0, clone(op.b)); return true;
+    }
+    if (idx < 0 || op.b !== undefined || !eq(t[idx], op.a)) return false;
+    t.splice(idx, 1); return true;                  // se había agregado: se quita
+  }
+
+  const RAW = {};
+  async function applyWrite(w) {
+    const raw = RAW[w.c]; const doc0 = await raw.get(w.d);
+    if (w.k === 'del') { if (doc0 != null) return [0, 1]; await raw.set(w.d, w.before); return [1, 0]; }
+    if (w.k === 'new') { if (doc0 == null) return [0, 0]; if (!raw.del || !eq(doc0, w.after)) return [0, 1]; await raw.del(w.d); return [1, 0]; }
+    const doc = doc0 || (w.base && clone(w.base)); if (!doc) return [0, w.ops.length];
+    let ok = 0, skip = 0;
+    for (const op of w.ops.slice().reverse()) { if (applyOp(doc, op)) ok++; else skip++; }
+    if (!ok) return [0, skip];
+    if (isObj(doc.slots)) Object.keys(doc.slots).forEach(k => { if (Array.isArray(doc.slots[k]) && !doc.slots[k].length) delete doc.slots[k]; });
+    if (w.c === 'patients') doc.updated = Date.now();
+    await raw.set(w.d, doc);
+    return [ok, skip];
+  }
+
+  /* ---- pila por usuario ---- */
+  const load = () => { try { return (JSON.parse(localStorage.getItem(KEY()) || '[]') || []).filter(g => Date.now() - g.at < TTL); } catch (e) { return []; } };
+  function save(st) {
+    for (;;) { try { localStorage.setItem(KEY(), JSON.stringify(st)); break; } catch (e) { if (st.length <= 1) break; st.shift(); } }
+    listeners.forEach(f => f());
+  }
+  function commit(g) { if (!g.w.length || !S.me) return; const st = load(); st.push({ id: uid(), l: g.l, at: Date.now(), w: g.w }); save(st.slice(-MAX)); }
+  function record(col, id, before, after) {
+    const ch = docChange(before, after); if (!ch) return;
+    const w = Object.assign({ c: col, d: id }, ch);
+    if (cur) cur.w.push(w); else commit({ l: LABELS[col], w: [w] });
+  }
+
+  /* ---- enganche a Store: lecturas toman una foto, escrituras guardan la diferencia ---- */
+  function hook(col, getN, setN, delN) {
+    const rawGet = Store[getN], rawSet = Store[setN], rawDel = delN ? Store[delN] : null;
+    const key = id => col + '/' + id;
+    RAW[col] = { get: rawGet, set: rawSet, del: rawDel };
+    Store[getN] = async id => { const d = await rawGet(id); snaps[key(id)] = { d: clone(d), t: Date.now() }; return d; };
+    Store[setN] = async (id, d) => {
+      if (busy) return rawSet(id, d);
+      const s = snaps[key(id)]; const before = s && Date.now() - s.t < SNAP_MS ? s.d : await rawGet(id);
+      const r = await rawSet(id, d); snaps[key(id)] = { d: clone(d), t: Date.now() };
+      record(col, id, before, clone(d)); return r;
+    };
+    if (rawDel) Store[delN] = async id => {
+      if (busy) return rawDel(id);
+      const before = await rawGet(id); const r = await rawDel(id); delete snaps[key(id)];
+      record(col, id, before, null); return r;
+    };
+  }
+  hook('agenda', 'getAgenda', 'setAgenda');
+  hook('patients', 'getPatient', 'setPatient', 'delPatient');
+  hook('billing', 'getBilling', 'setBilling');
+
+  return {
+    // Agrupa todo lo que escribe una acción del usuario en un solo paso de "deshacer".
+    run(label, fn) {
+      if (cur) return fn();
+      const g = cur = { l: typeof label === 'function' ? label() : label, w: [] };
+      return Promise.resolve().then(fn).finally(() => { cur = null; commit(g); });
+    },
+    wrap(label, fn) { return function (...a) { return Undo.run(typeof label === 'function' ? () => label(...a) : label, () => fn.apply(this, a)); }; },
+    peek() { const st = load(); return st.length ? st[st.length - 1] : null; },
+    count: () => load().length,
+    onChange(f) { listeners.add(f); return () => listeners.delete(f); },
+    // Deshace la última acción de este usuario. Devuelve { label, ok, skipped }.
+    async undo() {
+      const g = this.peek(); if (!g) return null;
+      let ok = 0, skipped = 0; busy = true;
+      try { for (const w of g.w.slice().reverse()) { const [o, s] = await applyWrite(w); ok += o; skipped += s; } }
+      finally { busy = false; }
+      save(load().filter(x => x.id !== g.id));
+      return { label: g.l, ok, skipped };
+    }
+  };
+})();
+
 /* ================= estado ================= */
 const S = {
   auth: null,
-  cfg: DEFAULT_CFG, users: {}, agenda: {}, patients: {}, news: {}, sel: null, hpro: null, q: '', pf: 'all', recover: null, moving: null, pm: fmt(nowBA()).slice(0, 7), ppro: null, pview: 'month', openPat: {}, fullWeek: false, month: fmt(nowBA()).slice(0, 7), mdet: false, me: null, tab: 'home',
+  cfg: DEFAULT_CFG, users: {}, agenda: {}, patients: {}, news: {}, sel: null, hpro: null, q: '', pf: 'all', recover: null, moving: null, pm: fmt(nowBA()).slice(0, 7), ppro: null, pview: 'month', openPat: {}, openSess: {}, fullWeek: false, month: fmt(nowBA()).slice(0, 7), mdet: false, me: null, tab: 'home',
   week: fmt(mondayOf(nowBA())), proId: null, mobDay: null, roleFilter: '*', hourFilter: null,
   ready: { cfg: false, users: false }, sig: ''
 };
@@ -511,7 +673,8 @@ const ICON = {
   moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
   auto: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
-  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'
 };
 const ico = (n, s = 20) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[n] || ''}</svg>`;
 const PHOTO_OK = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
@@ -568,6 +731,7 @@ function renderShell() {
     <header class="top">
       <div class="brand">${brandLogo()}<h1>${BRAND}<small>Agenda semanal</small></h1></div>
       <div class="who">
+        <button class="ibtn" id="undo" aria-label="Deshacer mi última acción">${ico('undo', 18)}</button>
         <button class="ibtn" id="theme" title="Tema: ${themeLabel()}" aria-label="Tema: ${themeLabel()}. Tocá para cambiar">${ico(THEME === 'dark' ? 'moon' : THEME === 'light' ? 'sun' : 'auto', 18)}</button>
         <div class="usr"><div class="un"><b>${esc(me.name)}</b><small>${esc(roleText(me))}</small></div>${avatarHTML(me, 38)}</div>
         <button class="ibtn" id="out" title="Salir" aria-label="Salir">${ico('logout', 18)}</button>
@@ -579,8 +743,32 @@ function renderShell() {
     <nav class="bnav" aria-label="Secciones">${nav(true)}</nav>`;
   $('#out').onclick = () => logout();
   $('#theme').onclick = cycleTheme;
+  $('#undo').onclick = doUndo; refreshUndo();
   app.querySelectorAll('.tabs,.bnav').forEach(n => n.onclick = e => { const b = e.target.closest('[data-tab]'); if (b) goTab(b.dataset.tab); });
 }
+
+// Botón "Deshacer": cada persona deshace solo su última acción; lo que hicieron los demás queda como está.
+function refreshUndo() {
+  const b = $('#undo'); if (!b) return;
+  const g = Undo.peek(); b.disabled = !g; b.style.opacity = g ? '' : '.4';
+  b.title = g ? `Deshacer: ${g.l} (Ctrl+Z)` : 'No hay acciones tuyas para deshacer';
+}
+Undo.onChange(refreshUndo);
+async function doUndo() {
+  const g = Undo.peek(); if (!g) return toast('No hay acciones tuyas para deshacer.');
+  if (!(await confirmBox(`Se deshace tu última acción: ${g.l}. Lo que hicieron otras personas no se modifica.`, 'Deshacer', 'Cancelar', '¿Deshacer la última acción?', true))) return;
+  try {
+    const r = await Undo.undo(); if (!r) return;
+    toast(!r.ok && r.skipped ? 'No se pudo deshacer: otra persona ya modificó esos datos.'
+      : r.skipped ? `Deshecho: ${r.label}. Algunos cambios se dejaron porque otra persona los modificó después.` : `Deshecho: ${r.label}`);
+    if (S.tab === 'patients') loadPatientsMonth(); else renderView(true);
+  } catch (er) { console.error(er); toast('No se pudo deshacer. Probá de nuevo.'); }
+}
+document.addEventListener('keydown', e => {
+  if (!S.me || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey || (e.key || '').toLowerCase() !== 'z') return;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target || {}).tagName) || (e.target && e.target.isContentEditable) || $('#modal').innerHTML || $('#dialog').innerHTML) return;
+  e.preventDefault(); doUndo();
+});
 
 function renderView(force) {
   if (S.tab === 'home') { if (force || !$('#newsbox')) viewHome(); return; }
@@ -1547,7 +1735,13 @@ function viewPatients() {
     $('#pmnext').onclick = () => { S.pm = ymShift(S.pm, 1); viewPatients(); };
     $('#pmtoday').onclick = () => { S.pm = fmt(nowBA()).slice(0, 7); viewPatients(); };
   }
-  $('#plist').onclick = e => { const b = e.target.closest('[data-pt]'); if (b) patientModal(b.dataset.pt); };
+  $('#plist').onclick = e => {
+    const b = e.target.closest('[data-pt]'); if (b) return patientModal(b.dataset.pt);
+    const sb = e.target.closest('[data-sess]');
+    if (sb) { const k = sb.dataset.sess; if (S.openSess[k]) delete S.openSess[k]; else S.openSess[k] = 1; return renderPatientList(); }
+    const am = e.target.closest('[data-addmiss]');
+    if (am) { const [pid, tid, n, prev] = am.dataset.addmiss.split('|'); missingModal(pid, tid, +n, prev); }
+  };
   $('#plist').onchange = async e => {
     const sel = e.target.closest('[data-bm]'); if (!sel) return;
     const [pid, tid] = sel.dataset.bm.split('|');
@@ -1624,8 +1818,12 @@ function renderPatientList() {
     if (pl && pl.billMonth) tags.push(`Se factura en ${esc(ymLabel(pl.billMonth))}`);
     return `<div class="person"><div><h3>${esc(o.name)}${badge}</h3>${line1 ? `<p>${esc(line1)}</p>` : ''}${lines.map(l => `<p>${l}</p>`).join('')}${tags.length ? `<p class="ptags">${tags.map(t => `<span>${t}</span>`).join('')}</p>` : ''}</div>
       <div class="rowbtns">${pl && o.pid && canEditPatient(o.pt) ? `<label class="catsel"><span>Se factura en</span><select data-bm="${esc(o.pid)}|${esc(o.tid)}">${billMonthOptionsHTML(pl, S.pview === 'month' ? S.pm : fmt(nowBA()).slice(0, 7))}</select></label>` : ''}
-      ${o.pid ? `<button class="btn ghost small" data-pt="${esc(o.pid)}">Ficha</button>` : ''}</div></div>`;
+      ${pl && o.pid && o.tid ? `<button class="btn ghost small" data-sess="${esc(o.pid)}|${esc(o.tid)}" aria-expanded="${!!S.openSess[o.pid + '|' + o.tid]}">Sesiones</button>` : ''}
+      ${o.pid ? `<button class="btn ghost small" data-pt="${esc(o.pid)}">Ficha</button>` : ''}</div></div>
+      ${pl && o.pid && o.tid && S.openSess[o.pid + '|' + o.tid] ? `<div class="sesbox" data-sb="${esc(o.pid)}|${esc(o.tid)}"><p class="hint">Cargando sesiones…</p></div>` : ''}`;
   };
+  const paintSess = () => box.querySelectorAll('[data-sb]').forEach(el => fillSessBox(el));
+  setTimeout(paintSess, 0);
   box.innerHTML = (inTr.length ? `<div class="grp">En tratamiento · ${inTr.length}</div>${inTr.slice(0, 120).map(rowHTML).join('')}` : '')
     + (done.length ? `<div class="grp">${S.pview === 'month' ? 'Terminan este mes o ya finalizaron' : 'Finalizados o sin tratamiento activo'} · ${done.length}</div>${done.slice(0, 120).map(rowHTML).join('')}` : '');
 }
@@ -1701,8 +1899,11 @@ function patientModal(pid) {
         + ' Las sesiones ya realizadas y las faltas quedan en la agenda como registro.';
       if (!(await confirmBox(msg, 'Eliminar'))) return;
       try {
-        for (const [pr, items] of Object.entries(pending)) await deleteSessions(pr, items, false);
-        await Store.delPatient(pid); delete S.patients[pid]; toast('Paciente eliminado'); closeModal();
+        await Undo.run('Eliminar paciente ' + p.name, async () => {
+          for (const [pr, items] of Object.entries(pending)) await deleteSessions(pr, items, false);
+          await Store.delPatient(pid);
+        });
+        delete S.patients[pid]; toast('Paciente eliminado'); closeModal();
       } catch (er) { console.error(er); toast((er && er.status === 403 && er.message) || 'No se pudo eliminar.'); }
     }
   };
@@ -1727,7 +1928,7 @@ function patientModal(pid) {
       if (Array.isArray(cur.history)) cur.history = cur.history.map(n => { const el = f['hn_' + n.id]; return el ? { ...n, text: el.value.trim() } : n; }).filter(n => (n.text || '').trim());
       const nn = f.newnote && f.newnote.value.trim();
       if (nn) (cur.history = cur.history || []).push({ id: uid(), ts: Date.now(), by: S.me, byName: (S.users[S.me] || {}).name || '', text: nn });
-      await Store.setPatient(id, cur); toast(isNew ? 'Paciente creado' : 'Cambios guardados'); closeModal();
+      await Undo.run((isNew ? 'Crear paciente ' : 'Editar ficha de ') + name, () => Store.setPatient(id, cur)); toast(isNew ? 'Paciente creado' : 'Cambios guardados'); closeModal();
     } catch (er) { $('#ferr').textContent = 'No se pudo guardar. Revisá tu permiso de edición.'; }
   };
 }
@@ -1750,6 +1951,96 @@ async function fetchEntries(proId, from, to) {
     (byDate[date] = byDate[date] || []).push(...arr.map(p => Object.assign({ _k: k }, p)));
   }); });
   return byDate;
+}
+/* ---- sesiones de un tratamiento: pasadas, de hoy y futuras, con las que faltan en el esquema ---- */
+const SESS_ST = { prog: 'Pendiente', asist: 'Asistió', falto: 'Faltó', 'rec-done': 'Recuperada en otra fecha', cancel: 'Cancelada' };
+async function treatmentSessions(pid, tid) {
+  const pt = S.patients[pid] || await Store.getPatient(pid); const pl = pt && pt.plans && pt.plans[tid];
+  if (!pl) return null;
+  const today = todayStr();
+  const from = pl.start || fmt(atBA(pl.created || Date.now()));
+  let to = [pl.lastDate || '', today, pl.until ? fmt(addDays(parse(pl.until), -1)) : ''].sort().pop();
+  if (to < from) to = from;
+  const byDate = await fetchEntries(pl.proId, from, to);
+  const list = [];
+  Object.entries(byDate).forEach(([date, arr]) => arr.forEach(p => { if (p.tid === tid) { const k = p._k.split('_'); list.push({ date, h: +k[1], m: k[2] != null ? +k[2] : null, p }); } }));
+  list.sort((a, b) => a.date.localeCompare(b.date) || a.h - b.h || (a.m || 0) - (b.m || 0));
+  const have = new Set(list.filter(x => !x.p.rec && x.p.n != null).map(x => x.p.n));
+  const missing = []; for (let n = 1; n <= (pl.total || 0); n++) if (!have.has(n)) missing.push(n);
+  return { pt, pl, list, missing, today };
+}
+async function fillSessBox(el) {
+  const [pid, tid] = el.dataset.sb.split('|');
+  try {
+    const r = await treatmentSessions(pid, tid);
+    if (!r || !el.isConnected) return;
+    const { pl, list, missing, today } = r; const med = isMed(S.users[pl.proId]); const can = canEditAgenda(pl.proId);
+    const rows = list.map(x => ({ n: x.p.rec ? null : x.p.n, html: sessRowHTML(x, today, med) }));
+    // Cada sesión que falta se ubica antes de la primera agendada con número mayor.
+    missing.slice().reverse().forEach(n => {
+      const i = rows.findIndex(q => q.n != null && q.n > n); const prev = list.filter(x => !x.p.rec && x.p.n != null && x.p.n < n).pop();
+      const html = `<div class="sesrow miss"><span class="sn">Sesión ${n}</span><span class="sd">Sin agendar</span>${can ? `<button type="button" class="btn small" data-addmiss="${esc(pid)}|${esc(tid)}|${n}|${esc(prev ? prev.date : '')}">Agendar esta sesión</button>` : ''}</div>`;
+      rows.splice(i < 0 ? rows.length : i, 0, { n, html });
+    });
+    el.innerHTML = `<div class="sesh"><b>Sesiones del tratamiento</b><small>${list.filter(x => !x.p.rec).length} agendadas de ${pl.total}${missing.length ? ` · faltan ${missing.length} en el esquema` : ''}</small></div>`
+      + (rows.length ? rows.map(q => q.html).join('') : '<p class="hint">Este tratamiento no tiene sesiones agendadas.</p>');
+  } catch (er) { console.error(er); if (el.isConnected) el.innerHTML = '<p class="hint">No se pudieron cargar las sesiones.</p>'; }
+}
+function sessRowHTML(x, today, med) {
+  const p = x.p; const st = p.status || 'prog';
+  const when = x.date < today ? 'Pasada' : x.date === today ? 'Hoy' : 'Futura';
+  const lab = p.rec ? 'Recupero' + (p.n ? ' (sesión ' + p.n + ')' : '') : 'Sesión ' + (p.n || '·');
+  return `<div class="sesrow ${x.date === today ? 'today' : x.date < today ? 'past' : 'fut'}"><span class="sn">${esc(lab)}</span><span class="sd">${esc(labelDate(x.date))} · ${med ? tm(x.h, x.m) : hh(x.h)}</span><span class="badge ${st === 'asist' ? 'sec' : st === 'falto' || st === 'cancel' ? 'med' : ''}">${esc(SESS_ST[st] || st)}</span><small>${when}</small></div>`;
+}
+// Agenda una sola sesión que quedó sin lugar en el esquema (por ejemplo, una borrada por error), con su número original.
+async function addMissingSession({ pid, tid, n, date, h, m, status }) {
+  const pt = await Store.getPatient(pid); const pl = pt && pt.plans && pt.plans[tid];
+  if (!pl) return { ok: false, why: 'No se encontró el tratamiento.' };
+  const proId = pl.proId; if (!canEditAgenda(proId)) throw new Error('permiso');
+  const pro = S.users[proId]; const med = isMed(pro); const d = parse(date).getDay();
+  const wk = mondayKey(date); const id = wk + '_' + proId;
+  const doc = (await Store.getAgenda(id)) || { week: wk, proId, slots: {} }; doc.slots = doc.slots || {};
+  const key = slotKey(date, h, med ? m : null); const arr = doc.slots[key] || [];
+  const occ = arr.filter(occupies);
+  const fits = med ? occ.filter(p => !p.sob).length < 1 : occ.length < capAt(pro, h);
+  if (!works(pro, d, h) || isClosed(date) || blockAt(doc, date, h) || !fits) return { ok: false, why: 'Ese turno no está disponible (completo, fuera de horario, feriado o agenda cancelada).' };
+  arr.push({ id: uid(), name: pt.name, phone: pt.phone || '', note: '', pid, tid, n, series: tid, status: status || 'prog', by: S.me });
+  doc.slots[key] = arr; await Store.setAgenda(id, doc);
+  pl.placed = (pl.placed || 0) + 1; if (date > (pl.lastDate || '')) pl.lastDate = date; pt.updated = Date.now();
+  await Store.setPatient(pid, pt); S.patients[pid] = clone(pt);
+  return { ok: true };
+}
+function missingModal(pid, tid, n, prevDate) {
+  const pt = S.patients[pid]; const pl = pt && pt.plans && pt.plans[tid]; if (!pl) return toast('No se encontró el tratamiento.');
+  const pro = S.users[pl.proId]; const med = isMed(pro); const today = todayStr();
+  // Fecha sugerida: el próximo día del esquema original después de la sesión anterior.
+  const pat = pl.pat || {}; let date = prevDate ? fmt(addDays(parse(prevDate), 1)) : today;
+  for (let i = 0; i < 14 && Object.keys(pat).length && !pat[parse(date).getDay()]; i++) date = fmt(addDays(parse(date), 1));
+  const slot = pat[parse(date).getDay()] || Object.values(pat)[0] || {};
+  const h0 = slot.h != null ? slot.h : S.cfg.open;
+  const mins = []; for (let x = 0; x < 60; x += S.cfg.medMin || 20) mins.push(x);
+  openModal(`<button class="btn ghost small close" data-close>Cerrar</button><h2>Agendar sesión ${n}</h2>
+    <p class="sub">${esc(pt.name)} · ${esc(planTypeText(pl) || pl.dx || 'Tratamiento')} · con ${esc((pro || {}).name || 'profesional')}</p>
+    <form id="mf" autocomplete="off">
+      <div class="row2"><label class="fld"><span>Fecha</span><input type="date" name="date" value="${date}" required></label>
+        <label class="fld"><span>Hora</span><select name="h">${hourOpts(S.cfg.open, S.cfg.close - 1, h0)}</select></label></div>
+      ${med ? `<label class="fld"><span>Minuto</span><select name="m">${mins.map(x => `<option value="${x}"${x === (slot.m || 0) ? ' selected' : ''}>${pad(x)}</option>`).join('')}</select></label>` : ''}
+      <label class="fld"><span>Estado</span><select name="st"><option value="prog">Pendiente</option><option value="asist">Asistió</option><option value="falto">Faltó</option></select></label>
+      <p class="hint">Se agenda solo esta sesión, con el número ${n} del tratamiento. El resto del esquema no se toca.</p>
+      <p class="err" id="ferr"></p><button class="btn" type="submit">Agendar sesión ${n}</button>
+    </form>`);
+  const f = $('#mf'); const st = f.elements.st; if (date < today) st.value = 'asist';
+  f.elements.date.onchange = () => { st.value = f.elements.date.value < todayStr() ? 'asist' : 'prog'; };
+  $('#modal').onclick = e => { if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) closeModal(); };
+  f.onsubmit = async e => {
+    e.preventDefault(); const btn = f.querySelector('button[type=submit]'); btn.disabled = true; $('#ferr').textContent = '';
+    try {
+      const r = await addMissingSession({ pid, tid, n, date: f.elements.date.value, h: +f.elements.h.value, m: med ? +f.elements.m.value : null, status: st.value });
+      if (!r.ok) { $('#ferr').textContent = r.why; btn.disabled = false; return; }
+      closeModal(); toast(`Sesión ${n} agendada`);
+      if (S.tab === 'patients') { if (PD && PD.proId === pl.proId) loadPatientsMonth(); else renderPatientList(); }
+    } catch (er) { console.error(er); $('#ferr').textContent = 'No se pudo guardar. Revisá tu permiso de edición.'; btn.disabled = false; }
+  };
 }
 // mes en el que se factura una sesión: si el tratamiento tiene "facturar en" y la sesión es de ese mes o anterior, va a ese mes
 function effBillMonth(p, entYm) {
@@ -2837,6 +3128,20 @@ function viewConfig() {
     catch (er) { err.textContent = 'No se pudo guardar. Revisá tu permiso de edición.'; }
   };
 }
+
+// Cada acción del usuario forma un solo paso de "deshacer", con el nombre que se ve en el botón.
+addSessions = Undo.wrap(o => `Agendar ${o.name || 'sesiones'}`, addSessions);
+setStatus = Undo.wrap((proId, date) => `Cambiar estado de sesión del ${labelDate(date)}`, setStatus);
+removePatient = Undo.wrap((proId, date, key, pid, whole) => whole ? 'Borrar sesiones pendientes de la serie' : `Borrar sesión del ${labelDate(date)}`, removePatient);
+doRecover = Undo.wrap((date) => `Recuperar sesión en ${labelDate(date)}`, doRecover);
+moveEntry = Undo.wrap((src, date) => `Reagendar ${src.name || 'sesión'} al ${labelDate(date)}`, moveEntry);
+deleteSessions = Undo.wrap('Borrar sesiones', deleteSessions);
+cancelAgenda = Undo.wrap('Cancelar agenda', cancelAgenda);
+removeBlockGroup = Undo.wrap('Habilitar agenda', removeBlockGroup);
+runAutoReschedule = Undo.wrap('Reprogramar turnos', runAutoReschedule);
+setBillMonth = Undo.wrap('Cambiar mes de facturación', setBillMonth);
+saveBill = Undo.wrap('Guardar registro mensual', saveBill);
+addMissingSession = Undo.wrap((o) => `Agendar sesión ${o.n} faltante`, addMissingSession);
 
 applyTheme();
 initDrag();
