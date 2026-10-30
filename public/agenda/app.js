@@ -961,6 +961,31 @@ function bindWeekPicker() {
 }
 function shiftWeek(n) { S.week = fmt(addDays(parse(S.week), n)); viewAgenda(); }
 
+// Filas fijas: dentro de un horario cada paciente conserva la misma fila toda la semana.
+// Se ordenan por antigüedad (el turno cargado primero) y cada uno toma la primera fila libre en todos sus días;
+// si no hay ninguna, la que le sirve más días, y los días restantes van a la primera fila libre de ese día.
+// perDay: los turnos de cada día de ese horario. Devuelve, por día, un arreglo de nrows con el turno o null.
+const loadedAt = e => /^[0-9a-z]{13}$/.test(e.id || '') ? parseInt(e.id.slice(0, 8), 36) : Infinity;
+function alignRows(perDay, nrows, lim) {
+  const pats = new Map(); let seq = 0;
+  perDay.forEach((arr, di) => arr.forEach(e => {
+    const k = e.pid || pname(e) || e.id;
+    let p = pats.get(k); if (!p) pats.set(k, p = { seq: seq++, at: Infinity, byDay: new Map() });
+    p.at = Math.min(p.at, loadedAt(e));
+    if (!p.byDay.has(di)) p.byDay.set(di, []);
+    p.byDay.get(di).push(e);
+  }));
+  const rows = perDay.map(() => Array(nrows).fill(null));
+  const free = di => rows[di].findIndex(x => !x);
+  [...pats.values()].sort((a, b) => a.at - b.at || a.seq - b.seq).forEach(p => {
+    const ds = [...p.byDay.keys()];
+    let best = 0, bs = -1;
+    for (let r = 0; r < lim; r++) { const s = ds.filter(di => !rows[di][r]).length; if (s > bs) { bs = s; best = r; } if (s === ds.length) break; }
+    ds.forEach(di => p.byDay.get(di).forEach(e => { const r = !rows[di][best] ? best : free(di); if (r >= 0) rows[di][r] = e; }));
+  });
+  return rows;
+}
+
 function renderGrid() {
   const g = $('#grid'); if (!g) return;
   const pro = S.users[S.proId];
@@ -1031,6 +1056,9 @@ function renderGrid() {
     const capEl = med ? '' : mineCap ? `<button type="button" class="capbtn${hc < S.cfg.cap ? ' lim' : ''}" data-cap="${h}" title="Cupo de las ${h} h: tocá para cambiarlo o cerrar el horario">${hc ? 'Cupo ' + hc : 'Cerrado'}</button>`
       : hc < S.cfg.cap ? `<span class="capbtn lim" title="${hc ? 'Cupo reducido por el profesional' : 'Horario cerrado por el profesional'}">${hc ? 'Cupo ' + hc : 'Cerrado'}</span>` : '';
     html += `<div class="hb" style="grid-row:span ${nrows}">${h}<small>hs</small>${capEl}</div>`;
+    const lay = med ? null : alignRows(days.map(d => slots[slotKey(dateOf(d), h, null)] || []), nrows, Math.min(nrows, Math.max(hc, ...days.map(d => (slots[slotKey(dateOf(d), h, null)] || []).length))));
+    const firstFree = lay ? lay.map(rs => rs.indexOf(null)) : null;
+    const capLab = lay ? lay.map(rs => rs.findIndex((x, i) => !x && i >= hc)) : null;
     for (let r = 0; r < nrows; r++) {
       const m = med ? r * step : null;
       days.forEach(d => {
@@ -1048,11 +1076,11 @@ function renderGrid() {
           const dr = !reg && open && draftAt(date, h, m);
           html += `<div class="${base}${reg ? entryCls(reg) : dr ? ' draft' : ' empty'}" ${data}${reg ? ` data-eid="${reg.id}"` : ''} ${reg || r === 0 ? 'tabindex="0"' : ''}><span class="tm">${tm(h, m)}</span>${reg ? entryInner(reg) : dr ? draftHTML(dr) : '<span class="plus">+</span>'}${sobs.map(p => `<span class="sobchip" data-eid="${p.id}">S: ${esc(pname(p))}</span>`).join('')}</div>`;
         } else {
-          const e = arr[r];
+          const di = days.indexOf(d), e = lay[di][r], ff = firstFree[di];
           if (!e && !open) { html += `<div class="${base} off"></div>`; return; }
-          if (!e && r >= hc) { html += `<div class="${base} off capoff">${r === Math.max(hc, arr.length) ? `<span class="cxl">${hc ? 'No se aceptan más ingresos' : 'Horario cerrado'}</span>` : ''}</div>`; return; }
-          const dr = !e && open && r === arr.length && draftAt(date, h, null);
-          html += `<div class="${base}${e ? entryCls(e) : dr ? ' draft' : ' empty'}" ${data}${e ? ` data-eid="${e.id}"` : ''} ${e || r === arr.length ? 'tabindex="0"' : ''}>${e ? entryInner(e) : dr ? draftHTML(dr) : (open ? '<span class="plus">+</span>' : '')}</div>`;
+          if (!e && r >= hc) { html += `<div class="${base} off capoff">${r === capLab[di] ? `<span class="cxl">${hc ? 'No se aceptan más ingresos' : 'Horario cerrado'}</span>` : ''}</div>`; return; }
+          const dr = !e && open && r === ff && draftAt(date, h, null);
+          html += `<div class="${base}${e ? entryCls(e) : dr ? ' draft' : ' empty'}" ${data}${e ? ` data-eid="${e.id}"` : ''} ${e || r === ff ? 'tabindex="0"' : ''}>${e ? entryInner(e) : dr ? draftHTML(dr) : (open ? '<span class="plus">+</span>' : '')}</div>`;
         }
       });
     }
