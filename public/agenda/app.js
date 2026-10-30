@@ -2013,8 +2013,8 @@ async function addMissingSession({ pid, tid, n, date, h, m, status }) {
 function missingModal(pid, tid, n, prevDate) {
   const pt = S.patients[pid]; const pl = pt && pt.plans && pt.plans[tid]; if (!pl) return toast('No se encontró el tratamiento.');
   const pro = S.users[pl.proId]; const med = isMed(pro); const today = todayStr();
-  // Fecha sugerida: el próximo día del esquema original después de la sesión anterior.
-  const pat = pl.pat || {}; let date = prevDate ? fmt(addDays(parse(prevDate), 1)) : today;
+  // Fecha sugerida: el próximo día del esquema original después de la sesión anterior, nunca antes de hoy.
+  const pat = pl.pat || {}; let date = prevDate && prevDate >= today ? fmt(addDays(parse(prevDate), 1)) : today;
   for (let i = 0; i < 14 && Object.keys(pat).length && !pat[parse(date).getDay()]; i++) date = fmt(addDays(parse(date), 1));
   const slot = pat[parse(date).getDay()] || Object.values(pat)[0] || {};
   const h0 = slot.h != null ? slot.h : S.cfg.open;
