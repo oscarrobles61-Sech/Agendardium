@@ -1257,6 +1257,9 @@ function openSlot(date, h, d, m, eid) {
       <div class="fld"><span>Días de la semana</span>
         <div class="chips">${days.map(x => `<label class="chip"><input type="checkbox" name="d" value="${x}" ${x === d ? 'checked' : ''} ${works(pro, x, h) ? '' : 'disabled'}><span>${DAYS_S[x]}</span></label>`).join('')}</div>
         <small id="prev"></small></div>
+      <div class="banner" id="absw" role="status" hidden><p id="abstx" style="margin:0 0 8px"></p>
+        <button type="button" class="btn ghost small" data-absall hidden>Pasar a todos los días</button>
+        <label class="chk-line"><input type="checkbox" name="pact"><span>La pausa ya fue acordada con el paciente</span></label></div>
       <label class="fld"><span>Nota <small>(opcional)</small></span><input type="text" name="note" maxlength="120"></label>
       <div class="actions"><button class="btn" type="submit">${taken ? 'Asignar sobreturno' : 'Agendar'}</button><button class="btn ghost" type="button" data-firstonly>Agendar solo la primera sesión</button></div>
     </form>` : ''}`);
@@ -1336,7 +1339,26 @@ function openSlot(date, h, d, m, eid) {
   const chosenType = () => { const [type, spec] = (f.stype.value || 'rehabilitacion|').split('|'); return { type, spec }; };
   const isTraining = () => !M.tid && chosenType().type === 'entrenamiento';
   const maxCount = () => chosenType().type === 'practica' ? 999 : 60;
-  const updatePrev = () => {
+  // Aviso de ausencia larga del profesional: se recalcula en vivo, sin bloquear el formulario.
+  let absTok = 0, absTmr = null; M.abs = null;
+  const showAbs = a => {
+    const box = $('#absw'); if (!box) return; M.abs = a; box.hidden = !a; if (!a) return;
+    const out = $('#prev'); if (out && a.after.length) out.textContent = out.textContent.replace(/La última cae aprox\. el .*\.$/, `La última cae aprox. el ${labelDate(a.after[a.after.length - 1])}, por la ausencia.`);
+    $('#abstx').textContent = '⚠ ' + absenceText(a, pro, Math.max(1, parseInt(f.count.value, 10) || 1));
+    const ba = box.querySelector('[data-absall]'); ba.hidden = !(a.alt && a.alt.ok);
+  };
+  const refreshAbs = () => {
+    clearTimeout(absTmr); const my = ++absTok;
+    const ds = [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+    const n = Math.max(1, parseInt(f.count.value, 10) || 1);
+    if (isTraining() || n < 2 || !ds.length) { showAbs(null); return; }
+    absTmr = setTimeout(async () => {
+      let a = null; try { a = await absenceCheck(M.proId, M.date, M.h, ds, n); } catch (e) { a = null; }
+      if (M && my === absTok) showAbs(a);
+    }, 200);
+  };
+  const updatePrev = () => { updatePrev0(); refreshAbs(); };
+  const updatePrev0 = () => {
     const out = $('#prev'); const ds = [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
     const n = Math.max(1, parseInt(f.count.value, 10) || 1);
     if (!ds.length) { out.textContent = 'Elegí al menos un día.'; return; }
@@ -1399,6 +1421,7 @@ function openSlot(date, h, d, m, eid) {
   af.addEventListener('click', e => {
     const sg = e.target.closest('[data-sug]'); if (sg) link(sg.dataset.sug);
     if (e.target.closest('[data-unlink]')) unlink();
+    if (e.target.closest('[data-absall]') && M.abs && M.abs.alt) { const all = M.abs.alt.days; af.querySelectorAll('input[name=d]').forEach(x => { if (!x.disabled) x.checked = all.includes(+x.value); }); updatePrev(); saveDraft(); }
   });
   syncType(); updatePrev();
 
@@ -1440,9 +1463,13 @@ function openSlot(date, h, d, m, eid) {
     const count = Math.max(1, Math.min(maxCount(), parseInt(f.count.value, 10) || 1));
     const training = isTraining(), freq = type === 'entrenamiento' ? f.freq.value : null, practice = type === 'practica' ? practiceKey(spec) : null;
     if (training && freq !== 'libre' && chosen.length !== +freq) return toast(`Entrenamiento ${TRAINING_FREQ[freq]}: elegí ${freq} ${freq === '1' ? 'día' : 'días'} de la semana.`);
+    const pact = !!(f.pact && f.pact.checked);
+    let abs = null;
+    if (!only && !training && count > 1) { try { abs = await absenceCheck(M.proId, M.date, M.h, chosen, count); } catch (er) { abs = null; } }
+    if (abs && !pact && !(await confirmBox(absenceText(abs, pro, count) + ' ¿Agendar igual?', 'Igual agendar', 'Volver', 'Pausa de más de una semana', true))) return;
     const btn = af.querySelector('button[type=submit]'); btn.disabled = true;
     try {
-      const r = await addSessions({ proId: M.proId, startDate: M.date, h: M.h, m: M.m, sob: !!(so && so.checked), days: chosen, count, pid: M.pid, tid: M.tid,
+      const r = await addSessions({ pause: abs ? { from: abs.from, to: abs.to, days: abs.span, pact, by: S.me, at: Date.now() } : null, proId: M.proId, startDate: M.date, h: M.h, m: M.m, sob: !!(so && so.checked), days: chosen, count, pid: M.pid, tid: M.tid,
         name, dni: f.dni.value.trim(), phone: f.phone.value.trim(), insurance: f.insurance.value.trim(), affiliate: f.affiliate.value.trim(), dx: f.dx.value.trim(), note: f.note.value.trim(), type, spec, freq, practice, until: training ? monthAfter(M.date) : null, firstOnly: only });
       if (!r.ok) toast('No se pudo agendar: los turnos están completos, fuera del horario o en días cerrados.');
       else if (only) toast('Primera sesión agendada. Tocala en la agenda para agendar las restantes.');
@@ -1451,6 +1478,69 @@ function openSlot(date, h, d, m, eid) {
     } catch (er) { console.error(er); toast('No se pudo guardar. Revisá tu permiso de edición.'); }
     btn.disabled = false;
   };
+}
+
+/* ---- ausencias del profesional ----
+   Un tratamiento no debería quedar en pausa más de una semana por ausencia del profesional (licencia, vacaciones,
+   congreso, enfermedad...). Importa la duración, no el motivo: cuenta toda agenda cancelada salvo "Cierre del centro".
+   Si al agendar las sesiones quedan a los dos lados de una ausencia de más de 7 días, se avisa (no se bloquea). */
+const ABS_MAX_DAYS = 7;
+const isProAbsence = b => !!b && !/^(Cierre del centro|Feriado)/i.test(b.reason || '');
+async function absenceCheck(proId, startDate, h, days, count) {
+  const pro = S.users[proId]; if (!pro || count < 2 || !days.length) return null;
+  const docs = {};
+  const docFor = async date => {
+    const wk = mondayKey(date);
+    if (!(wk in docs)) { try { docs[wk] = await Store.getAgenda(wk + '_' + proId); } catch (e) { docs[wk] = null; } }
+    return docs[wk];
+  };
+  const absAt = async date => { const b = blockAt(await docFor(date), date, h); return isProAbsence(b) ? b : null; };
+  // Mismo recorrido que al agendar (sin mirar el cupo): qué sesiones caen antes y después de cada ausencia.
+  const placed = [], hits = [];
+  for (const { d, date } of candidates(startDate, days, weeksFor(count, days))) {
+    if (placed.length >= count) break;
+    if (!works(pro, d, h)) continue;
+    if (await absAt(date)) { hits.push({ date, before: placed.length }); continue; }
+    placed.push(date);
+  }
+  // Días que no cortan una ausencia: los que el profesional no atiende a esa hora y los feriados.
+  const passive = date => !works(pro, parse(date).getDay(), h) || isClosed(date);
+  const seen = new Set();
+  for (const hit of hits) {
+    if (!hit.before || hit.before >= placed.length || seen.has(hit.before)) continue;
+    seen.add(hit.before);
+    let from = hit.date, to = hit.date; const b0 = await absAt(hit.date);
+    for (let i = 1, x = hit.date; i < 120; i++) { x = fmt(addDays(parse(x), -1)); if (await absAt(x)) from = x; else if (!passive(x)) break; }
+    for (let i = 1, x = hit.date; i < 120; i++) { x = fmt(addDays(parse(x), 1)); if (await absAt(x)) to = x; else if (!passive(x)) break; }
+    const span = Math.round((parse(to) - parse(from)) / 864e5) + 1;
+    if (span <= ABS_MAX_DAYS) continue;
+    const k = hit.before;
+    const res = { from, to, span, reason: (b0 && b0.reason || '').split(':')[0], before: k, total: placed.length, after: placed.slice(k), lastBefore: placed[k - 1] };
+    // Alternativa: todos los días que el profesional atiende a esa hora, para terminar antes de la ausencia.
+    const all = ORDER.filter(x => S.cfg.days.includes(x) && works(pro, x, h));
+    if (all.length > days.length) {
+      let n = 0, last = '';
+      for (const { d, date } of candidates(startDate, all, weeksFor(count, all))) {
+        if (date >= from || n >= count) break;
+        if (!works(pro, d, h) || await absAt(date)) continue;
+        n++; last = date;
+      }
+      res.alt = { days: all, fits: n, last, ok: n >= count };
+    }
+    return res;
+  }
+  return null;
+}
+function absenceText(a, pro, count) {
+  const per = `del ${labelDate(a.from)} al ${labelDate(a.to)}`;
+  let s = `${pro.name} no atiende ${per}${a.reason ? ' (' + a.reason.toLowerCase() + ')' : ''}: son ${a.span} días, más de una semana. `
+    + `Con estos días entran ${a.before} de las ${count} sesiones antes; ${a.after.length === 1 ? 'la otra queda' : 'las otras ' + a.after.length + ' quedan'} para después (${a.after.slice(0, 3).map(labelDate).join(', ')}${a.after.length > 3 ? '…' : ''}).`;
+  const ix = (a.alt ? a.alt.days : []).map(x => ORDER.indexOf(x)); const seq = ix.length > 2 && ix.every((v, i) => !i || v === ix[i - 1] + 1);
+  const dtx = a.alt ? (seq ? `de ${DAYS[a.alt.days[0]].toLowerCase()} a ${DAYS[a.alt.days[a.alt.days.length - 1]].toLowerCase()}` : a.alt.days.map(x => DAYS_S[x].toLowerCase()).join(', ')) : '';
+  if (a.alt && a.alt.ok) s += ` Para terminar antes: agendando ${dtx} entran las ${count} y la última es el ${labelDate(a.alt.last)}.`;
+  else if (a.alt) s += ` Ni agendando todos los días que atiende entran todas (${a.alt.fits} de ${count}): conviene empezar después de la ausencia o acordar la pausa con el paciente.`;
+  else s += ' Conviene empezar después de la ausencia o acordar la pausa con el paciente.';
+  return s;
 }
 
 /* ---- alta de sesiones según cantidad y días ---- */
@@ -1497,6 +1587,7 @@ async function addSessions(o) {
   await flush();
   if (pl.until && !fresh && !o.firstOnly) pl.total = (pl.placed || 0) + ok; // restantes del pase: lo que entró
   if (pl.until && fresh && !o.firstOnly) pl.total = ok; // el pase del mes queda con las sesiones que se pudieron cargar
+  if (ok > 0 && o.pause) { pl.pauses = (pl.pauses || []).filter(x => x.from !== o.pause.from); pl.pauses.push(o.pause); }
   if (ok > 0) { pl.placed += ok; if (lastPlaced > (pl.lastDate || '')) pl.lastDate = lastPlaced; await Store.setPatient(pid, pt); }
   return { ok, skipped, pid };
 }
@@ -1535,8 +1626,11 @@ async function seriesModal(kind, ent, ctx) {
     if (!chosen.length) return toast('Elegí al menos un día.');
     if (training && pl.freq && pl.freq !== 'libre' && chosen.length !== +pl.freq) return toast(`Entrenamiento ${TRAINING_FREQ[pl.freq]}: elegí ${pl.freq} ${pl.freq === '1' ? 'día' : 'días'} de la semana.`);
     const count = training ? 999 : Math.max(1, Math.min(+f.count.max, parseInt(f.count.value, 10) || 1));
+    let abs = null;
+    if (!training && count > 1) { try { abs = await absenceCheck(ctx.proId, start, ctx.h, chosen, count); } catch (er) { abs = null; } }
+    if (abs && !(await confirmBox(absenceText(abs, pro, count) + ' ¿Agendar igual?', 'Igual agendar', 'Volver', 'Pausa de más de una semana', true))) return;
     const btn = f.querySelector('button[type=submit]'); btn.disabled = true;
-    const common = { proId: ctx.proId, startDate: start, h: ctx.h, m: ctx.m, days: chosen, count, pid: ent.pid,
+    const common = { pause: abs ? { from: abs.from, to: abs.to, days: abs.span, pact: false, by: S.me, at: Date.now() } : null, proId: ctx.proId, startDate: start, h: ctx.h, m: ctx.m, days: chosen, count, pid: ent.pid,
       name: pt.name, dni: pt.dni, phone: pt.phone, insurance: pt.insurance, affiliate: pt.affiliate, note: '' };
     try {
       const r = kind === 'rest'
