@@ -545,9 +545,11 @@ function render() {
   if (!unsubNews) unsubNews = Store.watchNews(map => { S.news = map; if (S.tab === 'home') renderNews(); });
   if (!unsubPat) unsubPat = Store.watchPatients(map => { S.patients = map; if (S.tab === 'patients') renderPatientList(); if (S.tab === 'home') renderReminders(); refreshSlot(); });
   renderView(false);
+  startAvisos();
 }
 
 function logout(silent) {
+  stopAvisos();
   S.me = null; S.sig = ''; S.tab = 'home'; S.proId = null; S.pruned = false;
   if (unsubAg) { unsubAg(); unsubAg = null; } agKey = '';
   stopBackupTimer();
@@ -723,6 +725,7 @@ function renderShell() {
   if (isCoord() && !sec && !isPro(me)) tabs = [['home', 'Inicio', 'home'], ['profile', 'Perfil', 'user']];
   else {
     tabs = [['home', 'Inicio', 'home'], ['agenda', 'Agenda', 'calendar'], ['month', 'Registro', 'file'], ['patients', 'Pacientes', 'users']];
+    if (canAvisos()) tabs.push(['avisos', 'Avisos', 'bell']);
     if (sec) tabs.push(['team', 'Equipo', 'userplus'], ['config', 'Ajustes', 'sliders']); else tabs.push(['profile', 'Perfil', 'user']);
   }
   if (!tabs.some(t => t[0] === S.tab)) S.tab = tabs[0][0];
@@ -740,11 +743,12 @@ function renderShell() {
     ${Store.mode === 'local' ? '<p class="banner">Modo local: los datos se guardan solo en este navegador.</p>' : ''}
     <nav class="tabs" aria-label="Secciones">${nav(false)}</nav>
     <div id="view"></div>
-    <nav class="bnav" aria-label="Secciones">${nav(true)}</nav>`;
+    <nav class="bnav${tabs.length > 6 ? ' many' : ''}" aria-label="Secciones">${nav(true)}</nav>`;
   $('#out').onclick = () => logout();
   $('#theme').onclick = cycleTheme;
   $('#undo').onclick = doUndo; refreshUndo();
   app.querySelectorAll('.tabs,.bnav').forEach(n => n.onclick = e => { const b = e.target.closest('[data-tab]'); if (b) goTab(b.dataset.tab); });
+  if (AV.unread > 0) setAvBadge(AV.unread);
 }
 
 // Botón "Deshacer": cada persona deshace solo su última acción; lo que hicieron los demás queda como está.
@@ -772,6 +776,7 @@ document.addEventListener('keydown', e => {
 
 function renderView(force) {
   if (S.tab === 'home') { if (force || !$('#newsbox')) viewHome(); return; }
+  if (S.tab === 'avisos') { if (force || !$('#avlist')) viewAvisos(); return; }   // la bandeja se actualiza sola
   if (!force && (S.tab === 'config' || S.tab === 'profile' || S.tab === 'month')) return;   // no pisar formularios abiertos
   if (S.tab === 'agenda') { const ae = document.activeElement; if (!force && ae && (ae.id === 'rf' || ae.id === 'hf')) return; viewAgenda(); } // no cortar lo que se está tipeando en el filtro
   else if (S.tab === 'patients') { if (force || !$('#plist')) viewPatients(); else renderPatientList(); }
@@ -3230,8 +3235,10 @@ function viewConfig() {
       <p class="err" id="ferr"></p>
       <button class="btn" type="submit">Guardar configuración</button>
     </form></section>
+    ${Store.mode === 'db' ? '<section class="panel" id="tplbox" style="margin-top:14px"></section>' : ''}
     <section class="panel" id="hol" style="margin-top:14px"></section>
     <section class="panel" id="bkp" style="margin-top:14px"><p class="hint">Cargando copias…</p></section>`;
+  AV.tplDraft = null; renderTplBox();
   renderHolidays();
   renderBackups();
   $('#cf').onsubmit = async e => {
@@ -3248,6 +3255,358 @@ function viewConfig() {
     const catPrices = {}; [1, 2, 3, 4].forEach(k => { const v = parseMoney(f['cp' + k].value); if (v > 0) catPrices[k] = v; });
     try { await Store.setCfg(Object.assign({}, S.cfg, { days, open, close, cap, medMin, sobre, maxRec, roles, catPrices, endReminder })); toast('Configuración guardada'); S.sig = ''; setTimeout(() => { render(); renderView(true); }, 50); }
     catch (er) { err.textContent = 'No se pudo guardar. Revisá tu permiso de edición.'; }
+  };
+}
+
+/* ================= avisos entre secretaría y profesionales (push) ================= */
+// Secretaría le manda avisos a un profesional; un profesional se los manda a toda la secretaría.
+// Los mensajes predefinidos se editan en Ajustes (solo secretaría) y se guardan en la configuración (cfg.notifTpl).
+// Cada dispositivo puede activar los avisos push: llegan a la barra de notificaciones aunque la agenda esté cerrada.
+const DEFAULT_TPL = {
+  sec: [
+    { id: 's1', text: 'Llegó tu paciente', pat: true },
+    { id: 's2', text: 'Paciente avisa que llega tarde', pat: true },
+    { id: 's3', text: 'Paciente canceló el turno de hoy', pat: true },
+    { id: 's4', text: 'Paciente debe orden / autorización', pat: true },
+    { id: 's5', text: 'Te buscan en recepción', pat: false }
+  ],
+  pro: [
+    { id: 'p1', text: 'Paciente no figura presente en sistema interno', pat: true },
+    { id: 'p2', text: 'Paciente no vino, por favor llamar', pat: true },
+    { id: 'p3', text: 'Reprogramar turno del paciente', pat: true },
+    { id: 'p4', text: 'Falta orden médica / autorización', pat: true },
+    { id: 'p5', text: 'Necesito ayuda en el box', pat: false }
+  ]
+};
+const tplList = kind => { const t = (S.cfg.notifTpl || {})[kind]; return Array.isArray(t) ? t : DEFAULT_TPL[kind]; };
+const canAvisos = () => Store.mode === 'db' && !!S.me && (isSec() || isPro(S.users[S.me]));
+const AV = { inbox: [], sent: [], unread: -1, box: 'in', loaded: false, timer: null, focus: null, started: false, tplDraft: null, pendingOpen: null };
+try { const q = new URLSearchParams(location.search).get('aviso'); if (q != null) AV.pendingOpen = +q || 0; } catch (e) {}
+const avApi = (m, u, b) => window.NeonDB.api(m, u, b);
+ICON.bell = '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>';
+
+function whenAv(ts) {
+  const d = atBA(ts), t = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  return fmt(d) === todayStr() ? t : `${DAYS_S[d.getDay()]} ${d.getDate()} ${MONTHS_S[d.getMonth()]} · ${t}`;
+}
+
+function startAvisos() {
+  if (!canAvisos()) return;
+  if (!AV.started) {
+    AV.started = true;
+    pollAvisos();
+    AV.timer = setInterval(() => { if (document.visibilityState !== 'hidden') pollAvisos(); }, 20000);
+    syncPush();
+  }
+  if (AV.pendingOpen != null) {
+    const id = AV.pendingOpen; AV.pendingOpen = null;
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+    openAvisoTab(id);
+  }
+}
+function stopAvisos() {
+  if (AV.timer) clearInterval(AV.timer);
+  Object.assign(AV, { inbox: [], sent: [], unread: -1, loaded: false, timer: null, started: false, focus: null });
+  setAvBadge(0);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && AV.started) pollAvisos(); });
+
+function openAvisoTab(id) {
+  AV.box = 'in'; AV.focus = id || null;
+  if (S.tab === 'avisos') { viewAvisos(); } else goTab('avisos');
+}
+
+// Fuera de la pestaña Avisos solo se consulta el contador; adentro, la bandeja completa.
+async function pollAvisos() {
+  if (!canAvisos()) return;
+  try {
+    if (S.tab === 'avisos') return loadAvisos();
+    const r = await avApi('GET', '/api/avisos/pendientes');
+    if (r.unread !== AV.unread) { AV.loaded = false; setAvBadge(r.unread); }
+  } catch (e) {}
+}
+async function loadAvisos() {
+  try {
+    const r = await avApi('GET', '/api/avisos');
+    AV.inbox = r.inbox; AV.sent = r.sent; AV.loaded = true;
+    setAvBadge(r.unread);
+    if (S.tab === 'avisos') renderAvList();
+  } catch (e) { const l = $('#avlist'); if (l && !AV.loaded) l.innerHTML = '<p class="hint">No se pudieron cargar los avisos.</p>'; }
+}
+function setAvBadge(n) {
+  AV.unread = n;
+  app.querySelectorAll('.tab[data-tab="avisos"]').forEach(t => {
+    let b = t.querySelector('.cnt');
+    if (n > 0) { if (!b) { b = document.createElement('b'); b.className = 'cnt'; t.appendChild(b); } b.textContent = n > 99 ? '99+' : n; }
+    else if (b) b.remove();
+  });
+  const u = $('#avun'); if (u) u.textContent = n > 0 ? `(${n})` : '';
+  try { if (navigator.setAppBadge) { if (n > 0) navigator.setAppBadge(n); else navigator.clearAppBadge(); } } catch (e) {}
+}
+
+/* ---- pestaña Avisos ---- */
+function viewAvisos() {
+  $('#view').innerHTML = `<section class="panel avisos">
+    <div class="head-row"><h2 style="margin:0">Avisos</h2><button class="btn" id="avnew">${ico('bell', 18)} Nuevo aviso</button></div>
+    <div id="avpush"></div>
+    <div class="head-row" style="margin-top:6px"><div class="seg" id="avseg">
+      <button type="button" data-box="in" aria-pressed="${AV.box === 'in'}">Recibidos <span id="avun"></span></button>
+      <button type="button" data-box="out" aria-pressed="${AV.box === 'out'}">Enviados</button></div>
+      <button class="btn ghost small" id="avall">Marcar todo como leído</button></div>
+    <div id="avlist">${AV.loaded ? '' : '<p class="hint">Cargando avisos…</p>'}</div></section>`;
+  $('#avnew').onclick = () => newAviso();
+  $('#avseg').onclick = e => { const b = e.target.closest('[data-box]'); if (!b) return; AV.box = b.dataset.box; AV.focus = null; $('#avseg').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', x === b)); renderAvList(); };
+  $('#avall').onclick = async () => { try { const r = await avApi('POST', '/api/avisos/leido', { all: true }); AV.inbox.forEach(n => { n.read = true; }); setAvBadge(r.unread); renderAvList(); } catch (e) { toast('No se pudo marcar como leído.'); } };
+  setAvBadge(Math.max(0, AV.unread));
+  renderPushBox();
+  if (AV.loaded) renderAvList();
+  loadAvisos();
+}
+
+function avItemHTML(n, box) {
+  const uName = id => (S.users[id] && S.users[id].name) || 'Alguien';
+  const who = box === 'in' ? uName(n.from) : n.group === 'secretaria' ? 'Secretaría' : uName(n.to);
+  const pro = n.proId && S.users[n.proId];
+  const pat = n.patient ? `<div class="avpat"><span>${ico('user', 16)} <b>${esc(n.patient)}</b> · ${esc(n.time || '')}${pro && (isSec() || n.proId !== S.me) ? ' · ' + esc(pro.name) : ''}${n.date && n.date !== todayStr() ? ' · ' + esc(labelDate(n.date)) : ''}</span>
+    ${n.date ? `<button type="button" class="btn ghost small" data-goto="${n.id}">Ver turno</button>` : ''}</div>` : '';
+  const done = n.handled ? `<small class="avok">✓ ${esc(n.handled)}${n.handledBy && n.handledBy !== S.me ? ' · ' + esc(uName(n.handledBy)) : ''}${n.handledAt ? ' · ' + esc(whenAv(n.handledAt)) : ''}</small>` : '';
+  const acts = box === 'in' && n.replyTo == null && !n.handled
+    ? `<div class="nact"><button type="button" class="btn small" data-rep="${n.id}" data-t="Recibido">Recibido</button><button type="button" class="btn ghost small" data-rep="${n.id}" data-t="En eso">En eso</button></div>` : '';
+  return `<article class="av-it${box === 'in' && !n.read ? ' new' : ''}${AV.focus === n.id ? ' focus' : ''}" data-id="${n.id}">
+    <div class="avh"><b>${box === 'in' ? 'De' : 'Para'} ${esc(who)}</b><small>${esc(whenAv(n.at))}</small></div>
+    <p class="avm">${esc(n.message)}</p>${n.comment ? `<p class="avc">${esc(n.comment)}</p>` : ''}${pat}${done}${acts}</article>`;
+}
+
+function renderAvList() {
+  const box = $('#avlist'); if (!box) return;
+  const list = AV.box === 'in' ? AV.inbox : AV.sent;
+  if (!list.length) { box.innerHTML = `<p class="hint" style="margin:14px 0 0">${AV.box === 'in' ? 'No recibiste avisos en los últimos 30 días.' : 'No mandaste avisos en los últimos 30 días.'}</p>`; return; }
+  const today = list.filter(n => fmt(atBA(n.at)) === todayStr()), older = list.filter(n => fmt(atBA(n.at)) !== todayStr());
+  box.innerHTML = (today.length ? `<h3 class="avday">Hoy</h3>${today.map(n => avItemHTML(n, AV.box)).join('')}` : '')
+    + (older.length ? `<h3 class="avday">Días anteriores</h3>${older.map(n => avItemHTML(n, AV.box)).join('')}` : '');
+  box.onclick = async e => {
+    const g = e.target.closest('[data-goto]');
+    if (g) {
+      const n = list.find(x => x.id === +g.dataset.goto); if (!n || !n.date) return;
+      S.week = mondayKey(n.date); S.mobDay = parse(n.date).getDay();
+      if (isSec() && n.proId) S.proId = n.proId;
+      return goTab('agenda');
+    }
+    const r = e.target.closest('[data-rep]');
+    if (r) {
+      r.disabled = true;
+      try { await avApi('POST', '/api/avisos/responder', { id: +r.dataset.rep, text: r.dataset.t }); toast('Respuesta enviada'); loadAvisos(); }
+      catch (er) { r.disabled = false; toast(er.message || 'No se pudo responder.'); }
+    }
+  };
+  const f = AV.focus && box.querySelector('.av-it.focus'); if (f) f.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  // Lo que se ve en Recibidos queda leído (se sigue resaltando hasta la próxima vez).
+  if (AV.box === 'in' && document.visibilityState === 'visible') {
+    const ids = AV.inbox.filter(n => !n.read).map(n => n.id);
+    if (ids.length) {
+      clearTimeout(renderAvList.t);
+      renderAvList.t = setTimeout(async () => {
+        if (S.tab !== 'avisos') return;
+        try { const res = await avApi('POST', '/api/avisos/leido', { ids }); AV.inbox.forEach(n => { if (ids.includes(n.id)) n.read = true; }); setAvBadge(res.unread); } catch (er) {}
+      }, 1500);
+    }
+  }
+}
+
+/* ---- mandar un aviso ---- */
+function newAviso() {
+  const kind = isSec() ? 'sec' : 'pro';
+  const list = tplList(kind).filter(t => !t.off && (t.text || '').trim());
+  openModal(`<h2>Nuevo aviso</h2><p class="sub">${isSec() ? 'Elegí el mensaje para el profesional.' : 'Elegí el mensaje para secretaría.'}</p>
+    <div class="avtpl">${list.map((t, i) => `<button type="button" class="avopt" data-i="${i}"><span>${esc(t.text)}</span>${t.pat ? '<small>Elegís paciente de hoy</small>' : ''}</button>`).join('')}
+      <button type="button" class="avopt free" data-free><span>Otro (texto libre)</span><small>Escribís el mensaje</small></button></div>
+    <div class="actions"><button class="btn ghost" data-close>Cancelar</button></div>`);
+  $('#modal .avtpl').onclick = e => {
+    const b = e.target.closest('.avopt'); if (!b) return;
+    if (b.hasAttribute('data-free')) return composeAviso({ free: true, message: '', patient: null });
+    const t = list[+b.dataset.i]; const D = { free: false, message: t.text, patient: null };
+    if (t.pat) pickPatient(D); else composeAviso(D);
+  };
+}
+
+async function pickPatient(D) {
+  openModal(`<h2>${esc(D.free ? 'Enlazar paciente' : D.message)}</h2><p class="sub">Pacientes agendados hoy${isSec() ? '' : ' en tu agenda'}.</p>
+    <input type="search" id="avq" placeholder="Buscar por nombre o profesional" autocomplete="off" aria-label="Buscar paciente">
+    <div id="avpl" class="avpl"><p class="hint">Cargando pacientes de hoy…</p></div>
+    <div class="actions"><button class="btn ghost" type="button" id="avnop">Seguir sin paciente</button><button class="btn ghost" type="button" data-close>Cancelar</button></div>`);
+  const q = $('#avq'); setTimeout(() => q && q.focus(), 50);
+  $('#avnop').onclick = () => { D.patient = null; composeAviso(D); };
+  let entries = [];
+  try { entries = (await avApi('GET', '/api/avisos/hoy')).entries; }
+  catch (e) { const l = $('#avpl'); if (l) l.innerHTML = '<p class="err">No se pudieron cargar los pacientes de hoy.</p>'; return; }
+  const draw = () => {
+    const l = $('#avpl'); if (!l) return;
+    const t = norm(q.value);
+    const rows = entries.filter(x => !t || norm(x.name).includes(t) || norm(x.proName).includes(t));
+    l.innerHTML = rows.length ? rows.map(x => `<button type="button" class="avpi" data-k="${entries.indexOf(x)}"><b>${esc(x.time)}</b><span>${esc(x.name)}</span>${isSec() ? `<small>${esc(x.proName)}</small>` : ''}</button>`).join('')
+      : `<p class="hint">${entries.length ? 'Ningún paciente de hoy coincide con la búsqueda.' : 'No hay pacientes agendados hoy.'}</p>`;
+  };
+  draw(); q.oninput = draw;
+  $('#avpl').onclick = e => { const b = e.target.closest('[data-k]'); if (!b) return; D.patient = entries[+b.dataset.k]; if (isSec()) D.to = D.patient.proId; composeAviso(D); };
+}
+
+function composeAviso(D) {
+  const sec = isSec();
+  const pros = Object.entries(S.users).filter(([, u]) => isPro(u) && u.active !== false).sort(byName);
+  const to = D.patient ? D.patient.proId : D.to;
+  const p = D.patient;
+  openModal(`<h2>Nuevo aviso</h2><form id="avf" autocomplete="off">
+    ${D.free ? `<label class="fld"><span>Mensaje</span><textarea name="msg" rows="3" maxlength="300" required>${esc(D.message)}</textarea></label>`
+      : `<div class="fld"><span>Mensaje</span><div class="avmsg">${esc(D.message)}</div></div>`}
+    <div class="fld"><span>Paciente</span>${p ? `<div class="avpat"><span>${esc(p.time)} · <b>${esc(p.name)}</b>${sec ? ' · ' + esc(p.proName) : ''}</span>
+        <span><button type="button" class="btn ghost small" data-chpat>Cambiar</button> <button type="button" class="btn ghost small" data-nopat>Quitar</button></span></div>`
+      : `<div><button type="button" class="btn ghost small" data-chpat>Enlazar paciente de hoy</button></div>`}</div>
+    ${sec ? `<label class="fld"><span>Para</span><select name="to" ${p ? 'disabled' : ''} required><option value="">Elegí un profesional</option>${pros.map(([id, u]) => `<option value="${esc(id)}"${id === to ? ' selected' : ''}>${esc(u.name)}</option>`).join('')}</select>${p ? '<small>Va al profesional de ese turno.</small>' : ''}</label>`
+      : `<div class="fld"><span>Para</span><div class="avmsg">Secretaría</div></div>`}
+    <label class="fld"><span>Comentario <small>(opcional)</small></span><textarea name="cmt" rows="2" maxlength="300">${esc(D.comment || '')}</textarea></label>
+    <p class="err" id="averr"></p>
+    <div class="actions"><button class="btn" type="submit">Enviar aviso</button><button class="btn ghost" type="button" data-back>Volver</button></div></form>`);
+  const f = $('#avf');
+  const keep = () => { if (D.free) D.message = f.msg.value; D.comment = f.cmt.value; if (sec && !p) D.to = f.to.value; };
+  f.onclick = e => {
+    if (e.target.closest('[data-chpat]')) { keep(); pickPatient(D); }
+    else if (e.target.closest('[data-nopat]')) { keep(); D.patient = null; composeAviso(D); }
+    else if (e.target.closest('[data-back]')) newAviso();
+  };
+  f.onsubmit = async e => {
+    e.preventDefault(); keep();
+    const err = $('#averr'); err.textContent = '';
+    const message = (D.free ? D.message : D.message || '').trim();
+    if (!message) { err.textContent = 'Escribí el mensaje.'; return; }
+    const dest = sec ? (p ? p.proId : D.to) : 'secretaria';
+    if (!dest) { err.textContent = 'Elegí a qué profesional se lo mandás.'; return; }
+    const bt = f.querySelector('[type=submit]'); bt.disabled = true; bt.textContent = 'Enviando…';
+    try {
+      await avApi('POST', '/api/avisos', { message, comment: D.comment || '', to: dest, patient: p ? { pid: p.pid, name: p.name, proId: p.proId, time: p.time } : null });
+      closeModal(); toast('Aviso enviado'); loadAvisos();
+    } catch (er) { bt.disabled = false; bt.textContent = 'Enviar aviso'; err.textContent = er.message || 'No se pudo enviar el aviso.'; }
+  };
+}
+
+/* ---- activar avisos push en este dispositivo ---- */
+function pushEnv() {
+  const ua = navigator.userAgent || '';
+  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && window.isSecureContext;
+  return { ios, standalone, supported };
+}
+async function pushReg() {
+  if (!('serviceWorker' in navigator)) return null;
+  return (await navigator.serviceWorker.getRegistration('/')) || navigator.serviceWorker.register('/sw.js', { scope: '/' });
+}
+async function pushState() {
+  const e = pushEnv();
+  if (e.ios && !e.standalone) return 'ios-install';
+  if (!e.supported) return e.ios ? 'ios-old' : 'unsupported';
+  if (Notification.permission === 'denied') return 'denied';
+  try { const reg = await pushReg(); const sub = reg && await reg.pushManager.getSubscription(); if (sub && Notification.permission === 'granted') return 'on'; } catch (er) {}
+  return 'off';
+}
+const b64uBytes = s => { const b = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+const sameKey = (buf, key) => { if (!buf) return false; const a = new Uint8Array(buf), b = b64uBytes(key); return a.length === b.length && a.every((x, i) => x === b[i]); };
+
+async function renderPushBox() {
+  const box = $('#avpush'); if (!box) return;
+  const st = await pushState();
+  const T = {
+    on: ['ok', 'Los avisos están activados en este dispositivo. Te llegan a la barra de notificaciones aunque la agenda esté cerrada.', '<button class="btn ghost small" id="pshtest">Mandar prueba</button><button class="btn ghost small" id="pshoff">Desactivar</button>'],
+    off: ['', 'Activá los avisos en este dispositivo para recibirlos en la barra de notificaciones aunque la agenda esté cerrada.', '<button class="btn small" id="pshon">Activar en este dispositivo</button>'],
+    'ios-install': ['', '<b>En iPhone, los avisos funcionan solo con la agenda agregada a la pantalla de inicio</b> (iOS 16.4 o más nuevo):<ol><li>Abrí esta página en <b>Safari</b>.</li><li>Tocá <b>Compartir</b> (el cuadrado con la flecha) y elegí <b>Agregar a pantalla de inicio</b>.</li><li>Abrí la agenda desde ese ícono, ingresá con tu DNI y volvé a Avisos para activarlos.</li></ol>', ''],
+    'ios-old': ['', 'Este iPhone no permite avisos push. Hace falta iOS 16.4 o más nuevo (Ajustes → General → Actualización de software).', ''],
+    denied: ['', 'Los avisos están bloqueados en este dispositivo. Para habilitarlos: en <b>Android</b>, Ajustes del teléfono → Apps → Chrome (o Agenda) → Notificaciones; en <b>iPhone</b>, Ajustes → Notificaciones → Agenda; en la <b>computadora</b>, el candado junto a la dirección → Notificaciones → Permitir. Después recargá la página.', ''],
+    unsupported: ['', 'Este navegador no permite avisos push. Probá con Chrome, Edge, Firefox o Safari actualizados.', '']
+  }[st];
+  box.innerHTML = `<div class="avpush ${T[0]}"><div>${T[1]}</div>${T[2] ? `<div class="nact">${T[2]}</div>` : ''}</div>`;
+  const on = $('#pshon'), off = $('#pshoff'), test = $('#pshtest');
+  if (on) on.onclick = enablePush;
+  if (off) off.onclick = disablePush;
+  if (test) test.onclick = async () => { test.disabled = true; try { await avApi('POST', '/api/push/prueba', {}); toast('Prueba enviada: debería llegarte en unos segundos.'); } catch (er) { toast(er.message || 'No se pudo mandar la prueba.'); } test.disabled = false; };
+}
+
+async function subscribePush(reg) {
+  const { key } = await avApi('GET', '/api/push');
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && !sameKey(sub.options && sub.options.applicationServerKey, key)) { try { await sub.unsubscribe(); } catch (e) {} sub = null; }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(key) });
+  await avApi('POST', '/api/push', { subscription: sub.toJSON() });
+}
+async function enablePush() {
+  const b = $('#pshon'); if (b) b.disabled = true;
+  try {
+    // En iPhone el permiso se tiene que pedir directo desde el toque, antes de cualquier otra espera.
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Sin permiso no se pueden mostrar avisos.'); return renderPushBox(); }
+    const reg = await pushReg(); await navigator.serviceWorker.ready;
+    await subscribePush(reg);
+    toast('Avisos activados en este dispositivo');
+  } catch (e) { console.error(e); toast('No se pudieron activar los avisos. Probá de nuevo.'); }
+  renderPushBox();
+}
+async function disablePush() {
+  try {
+    const reg = await pushReg(); const sub = reg && await reg.pushManager.getSubscription();
+    if (sub) { await avApi('DELETE', '/api/push', { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe(); }
+    toast('Avisos desactivados en este dispositivo');
+  } catch (e) { toast('No se pudieron desactivar.'); }
+  renderPushBox();
+}
+// Al ingresar: si este dispositivo ya tenía los avisos activados, queda a nombre de quien ingresó.
+async function syncPush() {
+  try {
+    if (!pushEnv().supported || Notification.permission !== 'granted') return;
+    const reg = await pushReg(); if (!reg) return;
+    if (await reg.pushManager.getSubscription()) await subscribePush(reg);
+  } catch (e) {}
+}
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+  navigator.serviceWorker.addEventListener('message', e => {
+    const d = e.data || {};
+    if (d.type === 'aviso' && AV.started) { if (S.tab === 'avisos') loadAvisos(); else pollAvisos(); }
+    if (d.type === 'abrir-aviso' && AV.started) openAvisoTab(d.id);
+  });
+}
+
+/* ---- Ajustes: mensajes predefinidos ---- */
+function renderTplBox() {
+  const box = $('#tplbox'); if (!box) return;
+  const T = AV.tplDraft || (AV.tplDraft = { sec: clone(tplList('sec')), pro: clone(tplList('pro')) });
+  box.innerHTML = `<h2>Mensajes predefinidos de Avisos</h2>
+    <p class="hint">Son las opciones que aparecen al mandar un aviso. "Pide paciente" abre el buscador con los pacientes agendados en el día. La opción "Otro (texto libre)" aparece siempre.</p>
+    ${['sec', 'pro'].map(k => `<h3 class="avday">${k === 'sec' ? 'De secretaría a profesionales' : 'De profesionales a secretaría'}</h3>
+      <div class="tpll" data-k="${k}">${T[k].map((t, i) => `<div class="tplr" data-i="${i}">
+        <input type="text" value="${esc(t.text)}" maxlength="120" data-f="text" aria-label="Mensaje ${i + 1}" placeholder="Escribí el mensaje">
+        <div class="tplo"><label class="tplc"><input type="checkbox" data-f="pat" ${t.pat ? 'checked' : ''}> Pide paciente</label>
+        <label class="tplc"><input type="checkbox" data-f="vis" ${t.off ? '' : 'checked'}> Visible</label>
+        <button type="button" class="ibtn" data-mv="-1" aria-label="Subir" ${i === 0 ? 'disabled' : ''}>↑</button><button type="button" class="ibtn" data-mv="1" aria-label="Bajar" ${i === T[k].length - 1 ? 'disabled' : ''}>↓</button><button type="button" class="ibtn" data-del aria-label="Borrar">✕</button></div></div>`).join('')}</div>
+      <button type="button" class="btn ghost small" data-add="${k}">Agregar mensaje</button>`).join('')}
+    <p class="err" id="tplerr" style="margin-top:12px"></p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="btn" id="tplsave">Guardar mensajes</button><button type="button" class="btn ghost" id="tplreset">Volver a los mensajes iniciales</button></div>`;
+  const at = el => { const r = el.closest('.tplr'), l = el.closest('.tpll'); return r && l ? [l.dataset.k, +r.dataset.i] : null; };
+  box.oninput = e => { const p = at(e.target); if (!p) return; const t = T[p[0]][p[1]], f = e.target.dataset.f;
+    if (f === 'text') t.text = e.target.value; else if (f === 'pat') t.pat = e.target.checked; else if (f === 'vis') t.off = !e.target.checked; };
+  box.onclick = async e => {
+    const add = e.target.closest('[data-add]');
+    if (add) { T[add.dataset.add].push({ id: uid(), text: '', pat: false }); renderTplBox(); const ins = box.querySelectorAll(`.tpll[data-k="${add.dataset.add}"] input[type=text]`); if (ins.length) ins[ins.length - 1].focus(); return; }
+    const mv = e.target.closest('[data-mv]'), del = e.target.closest('[data-del]');
+    if (mv || del) { const [k, i] = at(e.target); const L = T[k];
+      if (del) L.splice(i, 1); else { const j = i + +mv.dataset.mv; if (j < 0 || j >= L.length) return; [L[i], L[j]] = [L[j], L[i]]; }
+      return renderTplBox(); }
+    if (e.target.closest('#tplreset')) { if (await confirmBox('Se reemplazan las dos listas por los mensajes iniciales. Tenés que tocar "Guardar mensajes" para que quede.', 'Reemplazar', 'Cancelar', '¿Volver a los mensajes iniciales?', true)) { AV.tplDraft = clone(DEFAULT_TPL); renderTplBox(); } return; }
+    if (e.target.closest('#tplsave')) {
+      const err = $('#tplerr'); err.textContent = '';
+      if (!isSec()) { err.textContent = 'No tenés permiso.'; return; }
+      const clean = L => L.map(t => ({ id: t.id || uid(), text: String(t.text || '').replace(/\s+/g, ' ').trim().slice(0, 120), pat: !!t.pat, off: !!t.off })).filter(t => t.text).slice(0, 30).map(t => { if (!t.off) delete t.off; return t; });
+      const notifTpl = { sec: clean(T.sec), pro: clean(T.pro) };
+      try { await Store.setCfg(Object.assign({}, S.cfg, { notifTpl })); S.cfg.notifTpl = notifTpl; AV.tplDraft = null; renderTplBox(); toast('Mensajes guardados'); }
+      catch (er) { err.textContent = 'No se pudieron guardar los mensajes.'; }
+    }
   };
 }
 

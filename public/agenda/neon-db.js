@@ -124,6 +124,8 @@
       setup: (name, dni, cfg) => call('POST', '/api/auth/setup', { name, dni, cfg }),
       claim: (id, dni) => call('POST', '/api/auth/claim', { id, dni })
     },
+    // Avisos entre secretaría y profesionales (rutas /api/avisos y /api/push).
+    api: (method, url, body) => call(method, url, body),
     // Corta todas las suscripciones (al cerrar sesión).
     stopAll() { subs.clear(); if (timer) { clearInterval(timer); timer = null; } versions = {}; }
   };

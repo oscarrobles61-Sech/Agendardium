@@ -124,6 +124,22 @@ profesional y horario). Aparece en gris en la grilla con la etiqueta "borrador":
 Al volver a tocar ese horario se recuperan los datos; al confirmar, el formulario se cierra y el borrador se borra.
 Los borradores de días pasados se descartan solos.
 
+## Avisos entre secretaría y profesionales (notificaciones push)
+
+- Pestaña **Avisos**: secretaría le manda un aviso a un profesional y cada profesional se lo manda a toda la secretaría.
+  Se elige un mensaje predefinido u "Otro (texto libre)"; si el mensaje pide paciente, se abre un buscador con los
+  pacientes agendados hoy (un profesional ve solo los suyos). Respuestas rápidas **Recibido** / **En eso**.
+- Los mensajes predefinidos de las dos listas se editan en **Ajustes** (solo secretaría) y se guardan en la configuración.
+- Cada dispositivo activa los avisos desde la pestaña: llegan a la barra de notificaciones aunque la agenda esté cerrada
+  (Web Push con service worker `public/sw.js` y `app/manifest.ts`). En iPhone hace falta iOS 16.4+ y la agenda
+  agregada a la pantalla de inicio desde Safari. En la pantalla bloqueada se ven solo las iniciales del paciente.
+- Tablas: `notifications`, `notification_recipients`, `push_subscriptions` y `push_keys` (migración `20261102000000_avisos_push`).
+- Claves VAPID: la app las genera la primera vez y las guarda en `push_keys`, no hay que configurar nada. Opcionalmente
+  se pueden definir `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` y `VAPID_SUBJECT` (`mailto:...`) en Vercel; si se cambian las
+  claves, cada persona tiene que volver a tocar "Activar" en sus dispositivos.
+- Rutas: `/api/avisos` (listar y mandar), `/api/avisos/hoy`, `/api/avisos/leido`, `/api/avisos/responder`,
+  `/api/avisos/pendientes`, `/api/push` (suscribir y dar de baja) y `/api/push/prueba`.
+
 ## Ingreso con DNI
 
 - Cada perfil entra escribiendo su DNI (se guarda en texto plano en `users.dni` y se compara sin puntos ni espacios).

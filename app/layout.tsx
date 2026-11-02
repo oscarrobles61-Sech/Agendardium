@@ -3,13 +3,16 @@ import './agenda.css';
 
 export const metadata: Metadata = {
   title: 'Agenda semanal · Centro Finochietto',
-  description: 'Agenda semanal de rehabilitación, kinesiología y consultorios.'
+  description: 'Agenda semanal de rehabilitación, kinesiología y consultorios.',
+  // En iPhone, agregada a la pantalla de inicio se abre como app (y puede recibir avisos push).
+  appleWebApp: { capable: true, title: 'Agenda', statusBarStyle: 'default' }
 };
 
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  viewportFit: 'cover'
+  viewportFit: 'cover',
+  themeColor: '#0A5CA8'
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
