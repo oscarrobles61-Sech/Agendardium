@@ -83,6 +83,9 @@ input[type=text],input[type=password],input[type=number],input[type=tel],select,
 .chip input:focus-visible+span{outline:2px solid var(--brand);outline-offset:2px}
 .chip input:disabled{cursor:not-allowed}
 .chip input:disabled+span{opacity:.4;text-decoration:line-through}
+.chip span small{font-weight:500;font-size:11px;margin-left:4px;opacity:.8}
+.dpick{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.dpick input[type=date]{max-width:220px;cursor:pointer}
 
 /* agenda */
 .bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
