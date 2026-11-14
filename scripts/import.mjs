@@ -1,15 +1,15 @@
 // Importa datos a la agenda a través de su propia API, así quedan guardados igual que si los cargara la app.
 //
-//   node scripts/import.mjs datos-agenda.json https://tu-agenda.vercel.app <DNI de administración>
+//   node scripts/import.mjs datos-agenda.json https://tu-agenda.vercel.app <DNI de administración> <PIN>
 //
-// Hace falta el DNI de un perfil de secretaría o administración: la API solo deja escribir con sesión.
+// Hace falta el DNI y el PIN de un perfil de secretaría o administración: la API solo deja escribir con sesión.
 // Acepta el export "datos-agenda.json" (usa la sección "raw") o una copia descargada desde
 // Ajustes → Copias de seguridad. No borra nada: agrega o reemplaza cada documento por su id.
 import { readFileSync } from 'node:fs';
 
-const [file, base = 'http://localhost:3000', dni] = process.argv.slice(2);
+const [file, base = 'http://localhost:3000', dni, pin = ''] = process.argv.slice(2);
 if (!file || !dni) {
-  console.error('Uso: node scripts/import.mjs <archivo.json> <url de la agenda> <DNI de administración>');
+  console.error('Uso: node scripts/import.mjs <archivo.json> <url de la agenda> <DNI de administración> <PIN>');
   process.exit(1);
 }
 
@@ -19,9 +19,10 @@ const cfg = src.cfg || src.config || null;
 const cols = ['users', 'patients', 'agenda', 'billing', 'news'];
 
 const login = await fetch(new URL('/api/auth/login', base), {
-  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dni })
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dni, pin })
 });
-if (!login.ok) throw new Error(`No se pudo ingresar con ese DNI: ${await login.text()}`);
+if (!login.ok) throw new Error(`No se pudo ingresar con ese DNI y PIN: ${await login.text()}`);
+if (!login.headers.get('set-cookie')) throw new Error('Ese perfil todavía no tiene PIN: entrá una vez a la agenda para crearlo.');
 const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
 
 async function get(col, id) {

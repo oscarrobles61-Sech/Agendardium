@@ -7,13 +7,13 @@ pacientes, registro/facturación, equipo, noticias del día y copias de segurida
 ## Cómo está armada
 
 - `public/agenda/app.js` y `app/agenda.css`: la aplicación original, con el mismo diseño y las mismas reglas.
-  Lo distinto: cada persona entra con su **DNI** (ver "Ingreso con DNI"), cada profesional tiene su agenda
+  Lo distinto: cada persona entra con su **DNI y PIN** (ver "Ingreso con DNI y PIN"), cada profesional tiene su agenda
   independiente (ver "Perfiles y permisos") y toda la app usa la hora de **Buenos Aires** (`America/Argentina/Buenos_Aires`),
   sin importar la zona horaria de la computadora o del servidor.
 - `public/agenda/neon-db.js`: cliente que reemplaza la base del HTML original y habla con las rutas `/api/db/*`.
   Revisa cambios cada 2,5 s, así que lo que carga una persona aparece solo en las pantallas de las demás.
 - `app/api/db/*`: rutas de Next.js que leen y escriben en Neon (`DATABASE_URL`). Todas piden sesión.
-- `app/api/auth/*`, `lib/auth.ts`: ingreso con DNI y sesión en una cookie firmada.
+- `app/api/auth/*`, `lib/auth.ts`, `lib/pin.ts`: ingreso con DNI + PIN, límite de intentos y sesión en una cookie firmada.
 - `lib/access.ts`: qué puede ver y modificar cada perfil. Se controla en el servidor, no solo en pantalla.
 - `lib/docmap.ts` y `lib/store.ts`: traducen lo que guarda la app a **tablas relacionales** y de vuelta.
 - `prisma/`: esquema y migraciones de la base con **Prisma**. Prisma se usa solo para migrar; la app consulta con el driver de Neon.
@@ -50,10 +50,10 @@ Si `DATABASE_URL` no está definida, la agenda funciona en **modo local** (datos
 2. Antes de **Deploy**, en **Environment Variables** agregá:
    - `DATABASE_URL` = la cadena *pooled* de Neon.
    - `DATABASE_URL_UNPOOLED` = la cadena directa (opcional; si no está, las migraciones usan `DATABASE_URL`).
-   - `SESSION_SECRET` = un texto largo al azar (opcional). Firma la cookie de sesión; si no está, se deriva de `DATABASE_URL`.
+   - `SESSION_SECRET` = un texto largo al azar (recomendado). Firma la cookie de sesión; si no está, se deriva de `DATABASE_URL`. Cargarlo o cambiarlo cierra las sesiones abiertas una vez.
      Si lo cambiás, todos tienen que volver a ingresar.
 3. Tocá **Deploy**. Cada build corre `prisma migrate deploy` antes de `next build` (script `vercel-build`),
-   así que la base queda siempre al día con las migraciones del repo. Si la base está vacía, la primera pantalla pide crear la cuenta de secretaría (nombre y DNI).
+   así que la base queda siempre al día con las migraciones del repo. Si la base está vacía, la primera pantalla pide crear la cuenta de secretaría (nombre, DNI y PIN).
 
 > Alternativa: en Vercel → tu proyecto → **Storage** → **Neon** podés crear la base desde Vercel; ahí `DATABASE_URL` se carga sola.
 
@@ -140,23 +140,48 @@ Los borradores de días pasados se descartan solos.
 - Rutas: `/api/avisos` (listar y mandar), `/api/avisos/hoy`, `/api/avisos/leido`, `/api/avisos/responder`,
   `/api/avisos/pendientes`, `/api/push` (suscribir y dar de baja) y `/api/push/prueba`.
 
-## Ingreso con DNI
+## Ingreso con DNI y PIN
 
-- Cada perfil entra escribiendo su DNI (se guarda en texto plano en `users.dni` y se compara sin puntos ni espacios).
-  El servidor guarda la sesión en una cookie firmada que dura 12 horas.
+- Cada perfil entra con su **DNI y un PIN de 6 a 8 números**. El DNI se guarda en `users.dni`; el PIN solo como
+  hash scrypt con sal propia en `user_pins` (nunca el PIN en sí). Se rechazan PIN muy fáciles (111111, 123456, parte del DNI).
+- La sesión es una cookie firmada que dura 12 horas y lleva la versión del PIN: si alguien cambia su PIN o la
+  secretaría se lo restablece, se cierran sus sesiones abiertas en otros dispositivos.
+- **Límite de intentos**: 5 PIN equivocados seguidos con un DNI lo bloquean 15 minutos (30 min, 1 h… en los bloqueos
+  siguientes, hasta 24 h). 30 errores en 15 minutos desde una misma IP la bloquean 15 minutos. La secretaría
+  desbloquea desde **Equipo**.
+- **Paso a PIN sin dejar a nadie afuera**: quien todavía no tiene PIN entra con el DNI (dejando el PIN vacío) y la
+  app le pide crearlo en ese momento. En **Equipo** se ve quién ya lo creó. Cuando estén todos, la secretaría tilda
+  **Exigir PIN a todos**: desde ahí nadie entra solo con el DNI.
+- **Olvidé mi PIN**: en **Equipo → Restablecer PIN** la secretaría genera un PIN temporal (se muestra una sola vez).
+  Con ese PIN se entra una vez y se elige uno propio. Cada uno puede cambiar su PIN en **Mi perfil**.
 - La secretaría carga o cambia el DNI de cada integrante en **Equipo**. No se permiten dos perfiles con el mismo DNI.
 - Si hay perfiles pero ninguno tiene DNI (por ejemplo, después de importar datos), la pantalla de ingreso pide
-  elegir un perfil de secretaría o administración y cargar su DNI. Desde ahí se cargan los del resto.
-- También se puede cargar a mano en Neon → SQL Editor: `UPDATE users SET dni = '12345678' WHERE name = 'Pamela';`
+  elegir un perfil de secretaría o administración y cargar su DNI y PIN. Desde ahí se cargan los del resto.
+- Rutas: `/api/auth/login`, `/api/auth/pin` (crear o cambiar el propio) y `/api/auth/pins` (solo administración).
 
-> No hay contraseña: quien conozca el DNI de alguien puede ingresar como esa persona. Para cerrar más el sitio,
-> Vercel tiene **Deployment Protection** (Settings → Deployment Protection).
+> Además conviene: `SESSION_SECRET` cargado en Vercel (si no, la firma se deriva de `DATABASE_URL`) y
+> **Deployment Protection** activado para que las URL de prueba (previews) no queden públicas.
+
+## Turnos guardados a la vez
+
+Cada semana de agenda tiene un número de revisión (`doc_revs`). Al guardar, la app manda la revisión que leyó; si otra
+persona guardó esa misma semana en el medio, el servidor rechaza el cambio (409) en vez de pisar sus turnos, la vista
+se actualiza y aparece el aviso "Otra persona cambió esta agenda al mismo tiempo". Se vuelve a intentar y listo.
+
+## Límites de Vercel y Neon
+
+- La agenda consulta cambios cada 6 s mientras se usa, cada 20 s tras 2 minutos sin tocarla, cada 60 s tras 10
+  minutos, y nada con la pestaña oculta (antes era cada 2,5 s siempre). Así gasta menos pedidos de Vercel y horas de Neon.
+- **Ajustes → Uso de la base** muestra el espacio usado frente al límite de Neon y, si están `NEON_API_KEY` y
+  `NEON_PROJECT_ID`, las horas de cómputo y la transferencia del mes. Al entrar, administración ve un aviso si algo pasa el 80%.
+  Si cambiás de plan: `NEON_STORAGE_MB`, `NEON_CU_HOURS`, `NEON_TRANSFER_GB`.
+- Vercel (plan Hobby) avisa por mail cuando te acercás a sus límites; el uso se ve en el panel → **Usage**.
 
 ## Importar datos
 
 `datos-agenda.json` (export de la agenda HTML) **no** está en el repo porque tiene datos personales. Dos formas de cargarlo:
 
 - **Desde Neon**: pegá el archivo `importar-datos.sql` en Neon → SQL Editor y tocá **Run** (después del primer deploy, que crea las tablas). No pisa nada que ya exista.
-- **Por la API**: `npm run db:import -- ruta/a/datos-agenda.json https://tu-agenda.vercel.app <DNI de administración>`. También acepta una copia descargada desde Ajustes. Conserva los DNI y perfiles ya cargados.
+- **Por la API**: `npm run db:import -- ruta/a/datos-agenda.json https://tu-agenda.vercel.app <DNI de administración> <PIN>`. También acepta una copia descargada desde Ajustes. Conserva los DNI y perfiles ya cargados.
 
 Después de importar, cargá los DNI (ver arriba).

@@ -2,8 +2,10 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { NextRequest, NextResponse } from 'next/server';
 import { sql } from './db';
 
-// Sesión con cookie firmada. Se entra con el DNI (texto plano en users.dni) y el servidor
+// Sesión con cookie firmada. Se entra con DNI + PIN (ver lib/pin.ts) y el servidor
 // decide qué puede leer y escribir cada perfil (ver lib/access.ts).
+// La cookie lleva la versión del PIN de la persona: si se cambia o restablece el PIN, las sesiones abiertas
+// con el anterior (por ejemplo en un celular perdido) dejan de valer.
 
 export const COOKIE = 'agenda_sesion';
 const TTL_MS = 12 * 3600 * 1000;
@@ -17,21 +19,28 @@ export type Me = { id: string; profiles: string[]; admin: boolean; pro: boolean;
 const key = () => process.env.SESSION_SECRET || createHash('sha256').update('agenda-sesion:' + (process.env.DATABASE_URL || '')).digest('hex');
 const sign = (payload: string) => createHmac('sha256', key()).update(payload).digest('base64url');
 
-export function makeToken(userId: string) {
-  const payload = Buffer.from(userId).toString('base64url') + '.' + (Date.now() + TTL_MS);
-  return payload + '.' + sign(payload);
-}
-
-function readToken(token: string | undefined): string | null {
+// Firma un valor (payload.firma) y lo verifica: lo usan la cookie de sesión y el pase para crear el PIN.
+export const signValue = (payload: string) => payload + '.' + sign(payload);
+export function verifyValue(token: string | undefined): string | null {
   if (!token) return null;
   const i = token.lastIndexOf('.');
   if (i < 0) return null;
   const payload = token.slice(0, i), sig = token.slice(i + 1);
   const good = Buffer.from(sign(payload)), got = Buffer.from(sig);
   if (good.length !== got.length || !timingSafeEqual(good, got)) return null;
-  const [uid, exp] = payload.split('.');
+  return payload;
+}
+
+export function makeToken(userId: string, ver: string) {
+  return signValue(Buffer.from(userId).toString('base64url') + '.' + (Date.now() + TTL_MS) + '.' + ver);
+}
+
+function readToken(token: string | undefined): { id: string; ver: string } | null {
+  const payload = verifyValue(token);
+  if (!payload) return null;
+  const [uid, exp, ver] = payload.split('.');
   if (!(Number(exp) > Date.now())) return null;
-  return Buffer.from(uid, 'base64url').toString();
+  return { id: Buffer.from(uid, 'base64url').toString(), ver: ver || '0' };
 }
 
 export const normDni = (v: unknown) => String(v ?? '').replace(/[^0-9a-z]/gi, '').toUpperCase();
@@ -53,14 +62,19 @@ export function meFrom(id: string, row: { role?: unknown; profiles?: unknown }):
 }
 
 export async function currentUser(req: NextRequest): Promise<Me | null> {
-  const id = readToken(req.cookies.get(COOKIE)?.value);
-  if (!id) return null;
-  const rows = await sql().query('SELECT id, role::text AS role, profiles::text[] AS profiles FROM users WHERE id = $1', [id]);
-  return rows.length ? meFrom(id, rows[0]) : null;
+  const t = readToken(req.cookies.get(COOKIE)?.value);
+  if (!t) return null;
+  const rows = await sql().query(
+    `SELECT u.id, u.role::text AS role, u.profiles::text[] AS profiles, coalesce(p.ver, 0)::text AS ver
+     FROM users u LEFT JOIN user_pins p ON p.user_id = u.id WHERE u.id = $1`, [t.id]);
+  if (!rows.length || rows[0].ver !== t.ver) return null;
+  return meFrom(t.id, rows[0]);
 }
 
-export function setSession(res: NextResponse, userId: string) {
-  res.cookies.set(COOKIE, makeToken(userId), {
+// Abre la sesión con la versión de PIN actual de la persona.
+export async function setSession(res: NextResponse, userId: string) {
+  const rows = await sql().query('SELECT ver::text AS ver FROM user_pins WHERE user_id = $1', [userId]);
+  res.cookies.set(COOKIE, makeToken(userId, rows[0]?.ver || '0'), {
     httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: TTL_MS / 1000
   });
   return res;

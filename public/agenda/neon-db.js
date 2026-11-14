@@ -4,9 +4,20 @@
  * (doc().get/set/delete/onSnapshot/acquire, collection().where/orderBy/limit/get/onSnapshot)
  * pero contra las rutas /api/db de Next.js, que guardan todo en Neon Postgres.
  * Los cambios de otros usuarios se detectan consultando /api/db/versions cada pocos segundos.
+ * El sondeo se espacia cuando nadie usa la pantalla (ahorra pedidos a Vercel y deja dormir a Neon)
+ * y se corta con la pestaña oculta. Al volver a usarla se consulta enseguida.
  */
 (function () {
-  const POLL_MS = 2500;
+  // Cada cuánto se consulta según hace cuánto que no se toca la pantalla.
+  const POLL_ACTIVE_MS = 6000;               // en uso
+  const POLL_IDLE_MS = 20000;                // más de 2 minutos sin tocar nada
+  const POLL_AWAY_MS = 60000;                // más de 10 minutos sin tocar nada
+  const IDLE_AFTER = 2 * 60000, AWAY_AFTER = 10 * 60000;
+  let lastInput = Date.now();
+  const pollEvery = () => {
+    const quiet = Date.now() - lastInput;
+    return quiet > AWAY_AFTER ? POLL_AWAY_MS : quiet > IDLE_AFTER ? POLL_IDLE_MS : POLL_ACTIVE_MS;
+  };
 
   async function call(method, url, body) {
     const r = await fetch(url, {
@@ -61,12 +72,27 @@
     }
   }
 
-  function ensureTimer() {
-    if (timer || !subs.size) return;
-    timer = setInterval(() => { if (document.visibilityState !== 'hidden') tick(false); }, POLL_MS);
+  let lastTick = 0;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (!subs.size) return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (document.visibilityState !== 'hidden') { lastTick = Date.now(); tick(false); }
+      schedule();
+    }, pollEvery());
   }
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(false); });
-  window.addEventListener('focus', () => tick(false));
+  const ensureTimer = () => { if (!timer) schedule(); };
+  // Volver a usar la pantalla después de un rato quieta: se consulta ya y se vuelve al ritmo normal.
+  const onInput = () => {
+    const wasQuiet = Date.now() - lastInput > IDLE_AFTER;
+    lastInput = Date.now();
+    if (wasQuiet && subs.size && Date.now() - lastTick > POLL_ACTIVE_MS) { lastTick = Date.now(); tick(false); schedule(); }
+  };
+  ['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev => window.addEventListener(ev, onInput, { passive: true, capture: true }));
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { lastInput = Date.now(); tick(false); schedule(); } });
+  window.addEventListener('focus', () => { lastInput = Date.now(); tick(false); });
 
   function subscribe(col, fetchFn, wrap, cb, err) {
     const sub = { col, fetch: fetchFn, wrap, cb, err, sig: null };
@@ -75,7 +101,7 @@
     ensureTimer();
     return () => {
       subs.delete(sub);
-      if (!subs.size && timer) { clearInterval(timer); timer = null; }
+      if (!subs.size && timer) { clearTimeout(timer); timer = null; }
     };
   }
 
@@ -89,8 +115,14 @@
     const fetchOne = async () => (await call('GET', q)).data;
     return {
       id,
-      async get() { return snapDoc(id, await fetchOne()); },
-      async set(data) { await call('PUT', '/api/db/doc', { col, id, data }); afterWrite(); },
+      // snap.rev: revisión leída. Pasándola a set({ ifRev }) el servidor rechaza (409) si otra persona guardó en el medio.
+      async get() { const r = await call('GET', q); const s = snapDoc(id, r.data); s.rev = r.rev || 0; return s; },
+      async set(data, opts) {
+        const body = { col, id, data };
+        if (opts && Number.isInteger(opts.ifRev)) body.ifRev = opts.ifRev;
+        try { const r = await call('PUT', '/api/db/doc', body); afterWrite(); return r; }
+        catch (e) { if (e.status === 409) afterWrite(); throw e; }
+      },
       async delete() { await call('DELETE', q); afterWrite(); },
       async acquire(opts) { return call('POST', '/api/db/lock', { col, id, holder: opts.holder, ttlMs: opts.ttlMs }); },
       onSnapshot(cb, err) { return subscribe(col, fetchOne, data => snapDoc(id, data), cb, err); }
@@ -116,17 +148,22 @@
       if (!h || !h.db) return null;
       return { doc, collection: col => query(col, {}) };
     },
-    // Ingreso con DNI: el servidor guarda la sesión en una cookie y controla los permisos.
+    // Ingreso con DNI + PIN: el servidor guarda la sesión en una cookie y controla los permisos.
     auth: {
       state: () => call('GET', '/api/auth/state'),
-      login: dni => call('POST', '/api/auth/login', { dni }),
+      login: (dni, pin) => call('POST', '/api/auth/login', { dni, pin }),
       logout: () => call('POST', '/api/auth/logout', {}),
-      setup: (name, dni, cfg) => call('POST', '/api/auth/setup', { name, dni, cfg }),
-      claim: (id, dni) => call('POST', '/api/auth/claim', { id, dni })
+      setup: (name, dni, pin, cfg) => call('POST', '/api/auth/setup', { name, dni, pin, cfg }),
+      claim: (id, dni, pin) => call('POST', '/api/auth/claim', { id, dni, pin }),
+      // Crear el PIN con el pase del ingreso, o cambiarlo con sesión iniciada ({ current, pin }).
+      setPin: body => call('POST', '/api/auth/pin', body),
+      // Solo administración: estado de los PIN, PIN temporal, desbloquear y exigir PIN.
+      pins: () => call('GET', '/api/auth/pins'),
+      pinAction: body => call('POST', '/api/auth/pins', body)
     },
     // Avisos entre secretaría y profesionales (rutas /api/avisos y /api/push).
     api: (method, url, body) => call(method, url, body),
     // Corta todas las suscripciones (al cerrar sesión).
-    stopAll() { subs.clear(); if (timer) { clearInterval(timer); timer = null; } versions = {}; }
+    stopAll() { subs.clear(); if (timer) { clearTimeout(timer); timer = null; } versions = {}; }
   };
 })();

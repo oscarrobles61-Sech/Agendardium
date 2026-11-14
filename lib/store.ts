@@ -67,31 +67,63 @@ function deleteMain(col: string, key: Row): Stmt[] {
 
 async function run(stmts: Stmt[]) {
   const q = sql();
-  await q.transaction(stmts.map(s => q.query(s.text, s.params)));
+  try { return await q.transaction(stmts.map(s => q.query(s.text, s.params))); }
+  catch (e) { if ((e as { code?: string })?.code === 'AGC01') throw new Conflict(); throw e; }
 }
+
+/* ---------------- revisión por documento ---------------- */
+// Colecciones que se editan leyendo y reescribiendo el documento entero: llevan número de revisión para que
+// dos personas guardando a la vez no se pisen (ver bump_doc_rev en la migración 20261114000000).
+export const REV_COLS = new Set(['agenda', 'patients', 'billing']);
+
+export class Conflict extends Error {
+  constructor() { super('Otra persona cambió esta agenda al mismo tiempo. Ya se actualizó con lo último: revisá y volvé a intentarlo.'); }
+}
+
+// La revisión va primero en la transacción: toma el candado de la fila y, si no coincide, corta todo.
+const revStmt = (col: string, id: string, expected: number | null): Stmt => ({
+  text: 'SELECT bump_doc_rev($1, $2, $3::bigint)::text AS rev', params: [col, id, expected]
+});
+
+export async function getRev(col: string, id: string): Promise<number> {
+  if (!REV_COLS.has(col)) return 0;
+  const rows = await sql().query('SELECT rev::text AS rev FROM doc_revs WHERE col = $1 AND id = $2', [col, id]);
+  return rows.length ? Number(rows[0].rev) : 0;
+}
+
+const revOf = (results: unknown[] | undefined, used: boolean) =>
+  used && results ? Number((results[0] as { rev: string }[])[0]?.rev || 0) : 0;
 
 /* ---------------- escritura ---------------- */
 
-export async function setDoc(col: string, id: string, data: Obj) {
+// `expectedRev`: revisión que leyó quien guarda (solo colecciones con revisión). Si no coincide, lanza Conflict.
+// Devuelve la revisión nueva (0 si la colección no lleva revisión).
+export async function setDoc(col: string, id: string, data: Obj, expectedRev: number | null = null): Promise<number> {
   const m = MAPPINGS[col];
   const key = m?.keyOf(id);
+  const useRev = REV_COLS.has(col);
+  const stmts: Stmt[] = useRev ? [revStmt(col, id, expectedRev)] : [];
   if (!m || !key) {
-    return run([
+    stmts.push(
       { text: `INSERT INTO docs (col, id, data, updated_at) VALUES ($1, $2, $3::jsonb, now())
                ON CONFLICT (col, id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`, params: [col, id, JSON.stringify(data)] },
       bump(col)
-    ]);
+    );
+    return revOf(await run(stmts), useRev);
   }
-  const stmts: Stmt[] = [...deleteMain(col, key), { text: 'DELETE FROM docs WHERE col = $1 AND id = $2', params: [col, id] }];
+  stmts.push(...deleteMain(col, key), { text: 'DELETE FROM docs WHERE col = $1 AND id = $2', params: [col, id] });
   for (const [table, rows] of m.toRows(id, data)) { const s = insert(table, rows); if (s) stmts.push(s); }
   stmts.push(bump(col));
-  await run(stmts);
+  return revOf(await run(stmts), useRev);
 }
 
 export async function deleteDoc(col: string, id: string) {
   const key = MAPPINGS[col]?.keyOf(id);
   const stmts: Stmt[] = [{ text: 'DELETE FROM docs WHERE col = $1 AND id = $2', params: [col, id] }];
   if (key) stmts.unshift(...deleteMain(col, key));
+  if (REV_COLS.has(col)) stmts.unshift(revStmt(col, id, null));
+  // El PIN de un integrante eliminado no tiene que quedar dando vueltas.
+  if (col === 'users') stmts.push({ text: 'DELETE FROM user_pins WHERE user_id = $1', params: [id] });
   stmts.push(bump(col));
   await run(stmts);
 }
