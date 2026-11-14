@@ -449,6 +449,29 @@ function* candidates(startDate, days, maxWeeks) {
     for (const d of ORDER) { if (!days.includes(d)) continue; const date = fmt(addDays(wm, ORDER.indexOf(d))); if (date >= startDate && !isClosed(date)) yield { d, date }; }
   }
 }
+// Días definidos de un tratamiento (esquema guardado en pl.pat), de lunes a domingo.
+const planDays = pl => (pl && pl.pat) ? ORDER.filter(d => pl.pat[d]) : [];
+// Hora de un día del esquema del tratamiento; si el día no está en el esquema, la hora de respaldo.
+const patHour = (pl, d, fb, med) => { const o = pl && pl.pat && pl.pat[d]; return o ? { h: o.h, m: med ? (o.m == null ? (fb.m || 0) : o.m) : null } : { h: fb.h, m: med ? fb.m : null }; };
+// Primera fecha útil para continuar un tratamiento: un día del esquema desde 'from' (nunca antes del día siguiente
+// a la última sesión agendada), salteando feriados, días que el profesional no atiende y días con la agenda cancelada.
+async function nextPlanDate(proId, pl, from, days, hourOf) {
+  let base = from;
+  if (pl && pl.lastDate) { const nx = fmt(addDays(parse(pl.lastDate), 1)); if (nx > base) base = nx; }
+  if (!days.length) return base;
+  const pro = S.users[proId]; let wk = null, doc = null, first = null, i = 0;
+  for (const { d, date } of candidates(base, days, 60)) {
+    if (!first) first = date;
+    if (++i > 120) break;
+    const hr = hourOf(d);
+    if (pro && !works(pro, d, hr.h)) continue;
+    const w = mondayKey(date);
+    if (w !== wk) { wk = w; try { doc = await Store.getAgenda(w + '_' + proId); } catch (e) { doc = null; } }
+    if (blockAt(doc, date, hr.h)) continue;
+    return date;
+  }
+  return first || base;
+}
 
 // El ingreso es con DNI (texto plano). Se compara sin puntos ni espacios.
 const normDni = v => String(v || '').replace(/[^0-9a-z]/gi, '').toUpperCase();
@@ -1325,8 +1348,10 @@ function openSlot(date, h, d, m, eid) {
       <p id="typeFixed" class="hint" hidden></p>
       <label class="fld" id="countFld"><span>Cantidad de ${unit}</span><input type="number" name="count" min="1" max="60" value="${med ? 1 : 10}" inputmode="numeric" style="max-width:140px"></label>
       ${med ? `<label class="chk-line"><input type="checkbox" id="sobchk" name="sob" ${taken ? 'checked' : ''}><span>Asignar como sobreturno</span></label>` : ''}
-      <div class="fld"><span>Días de la semana</span>
-        <div class="chips">${days.map(x => `<label class="chip"><input type="checkbox" name="d" value="${x}" ${x === d ? 'checked' : ''} ${works(pro, x, h) ? '' : 'disabled'}><span>${DAYS_S[x]}</span></label>`).join('')}</div>
+      <div class="fld"><span>Desde <small>(tocá para abrir el calendario)</small></span>
+        <div class="dpick"><input type="date" name="from" value="${date}" required></div></div>
+      <div class="fld"><span>Días de la semana <small id="dhint"></small></span>
+        <div class="chips" id="dchips"></div>
         <small id="prev"></small></div>
       <div class="banner" id="absw" role="status" hidden><p id="abstx" style="margin:0 0 8px"></p>
         <button type="button" class="btn ghost small" data-absall hidden>Pasar a todos los días</button>
@@ -1405,6 +1430,19 @@ function openSlot(date, h, d, m, eid) {
   const af = $('#af'); if (!af) return;
   const f = af.elements; const sug = $('#sug'), plink = $('#plink'), planBox = $('#planBox');
   const so = $('#sobchk'); if (so) so.onchange = () => { so.dataset.touched = '1'; syncSobLabel(); };
+  // Días y hora: al continuar un tratamiento se proponen sus días definidos, cada uno a su hora de siempre.
+  M.hours = {};
+  const hourOf = x => M.hours[x] || { h, m: med ? m : null };
+  const fmtH = x => { const o = hourOf(x); return med ? tm(o.h, o.m) : hh(o.h); };
+  const renderDays = checked => {
+    $('#dchips').innerHTML = days.map(x => { const o = hourOf(x); const ok = works(pro, x, o.h); const diff = o.h !== h || (med && o.m !== m);
+      return `<label class="chip"><input type="checkbox" name="d" value="${x}" ${checked.includes(x) && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}><span>${DAYS_S[x]}${diff ? `<small>${fmtH(x)}</small>` : ''}</span></label>`; }).join('');
+  };
+  const chosenDays = () => [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+  const fromDate = () => (/^\d{4}-\d{2}-\d{2}$/.test(f.from.value) ? f.from.value : M.date);
+  renderDays([d]);
+  // Abre el calendario desplegable al tocar el campo (en celulares ya lo abre solo).
+  f.from.addEventListener('click', () => { try { f.from.showPicker && f.from.showPicker(); } catch (er) {} });
 
   // Tipo elegido para un tratamiento nuevo: { type, spec }.
   const chosenType = () => { const [type, spec] = (f.stype.value || 'rehabilitacion|').split('|'); return { type, spec }; };
@@ -1420,30 +1458,33 @@ function openSlot(date, h, d, m, eid) {
   };
   const refreshAbs = () => {
     clearTimeout(absTmr); const my = ++absTok;
-    const ds = [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+    const ds = chosenDays();
     const n = Math.max(1, parseInt(f.count.value, 10) || 1);
     if (isTraining() || n < 2 || !ds.length) { showAbs(null); return; }
     absTmr = setTimeout(async () => {
-      let a = null; try { a = await absenceCheck(M.proId, M.date, M.h, ds, n); } catch (e) { a = null; }
+      let a = null; try { a = await absenceCheck(M.proId, fromDate(), M.h, ds, n); } catch (e) { a = null; }
       if (M && my === absTok) showAbs(a);
     }, 200);
   };
   const updatePrev = () => { updatePrev0(); refreshAbs(); };
   const updatePrev0 = () => {
-    const out = $('#prev'); const ds = [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+    const out = $('#prev'); const ds = chosenDays(); const from = fromDate();
     const n = Math.max(1, parseInt(f.count.value, 10) || 1);
     if (!ds.length) { out.textContent = 'Elegí al menos un día.'; return; }
     if (isTraining()) {
-      const until = monthAfter(M.date), fq = f.freq.value;
-      const n2 = [...candidates(M.date, ds, 6)].filter(x => x.date < until).length;
+      const until = monthAfter(from), fq = f.freq.value;
+      const n2 = [...candidates(from, ds, 6)].filter(x => x.date < until).length;
       out.textContent = (fq !== 'libre' && ds.length !== +fq ? `Con ${TRAINING_FREQ[fq]} elegí ${fq} ${fq === '1' ? 'día' : 'días'}. ` : '')
-        + `Se cargan las sesiones de un mes: del ${labelDate(M.date)} al ${labelDate(fmt(addDays(parse(until), -1)))} (${n2} ${n2 === 1 ? 'sesión' : 'sesiones'}, sin contar turnos completos).`;
+        + `Se cargan las sesiones de un mes: del ${labelDate(from)} al ${labelDate(fmt(addDays(parse(until), -1)))} (${n2} ${n2 === 1 ? 'sesión' : 'sesiones'}, sin contar turnos completos).`;
       return;
     }
-    if (n === 1) { out.textContent = `Se agenda 1 ${med ? 'consulta' : 'sesión'} el ${labelDate(M.date)}.`; return; }
-    let last = M.date, c = 0;
-    for (const x of candidates(M.date, ds, weeksFor(n, ds))) { c++; last = x.date; if (c >= n) break; }
-    out.textContent = `Se agendan ${n} ${unit} en ${ds.length} ${ds.length === 1 ? 'día' : 'días'} por semana, desde el ${labelDate(M.date)}. La última cae aprox. el ${labelDate(last)}.`;
+    if (n === 1 && !M.tid) { out.textContent = `Se agenda 1 ${med ? 'consulta' : 'sesión'} el ${labelDate(from)} a las ${fmtH(parse(from).getDay())}.`; return; }
+    let first = null, last = from, c = 0;
+    for (const x of candidates(from, ds, weeksFor(n, ds))) { c++; if (!first) first = x.date; last = x.date; if (c >= n) break; }
+    if (!first) { out.textContent = 'No hay fechas disponibles con esos días.'; return; }
+    const dl = ds.map(x => `${DAYS_S[x]} ${fmtH(x)}`).join(', ');
+    out.textContent = n === 1 ? `Se agenda 1 ${med ? 'consulta' : 'sesión'} el ${labelDate(first)} (${dl}).`
+      : `Se agendan ${n} ${unit} los ${dl}. La primera cae el ${labelDate(first)} y la última aprox. el ${labelDate(last)}.`;
   };
   // Tipo de sesión: se elige al crear el tratamiento; si se continúa uno, se muestra el que tiene.
   const syncType = () => {
@@ -1462,7 +1503,19 @@ function openSlot(date, h, d, m, eid) {
     if (sel && sel.value !== 'new') {
       const pl = S.patients[M.pid].plans[sel.value]; M.tid = sel.value;
       f.dx.value = pl.dx || ''; f.count.max = pl.total - pl.placed; f.count.value = pl.total - pl.placed;
-    } else { M.tid = null; f.count.max = maxCount(); if (sel) f.count.value = med ? 1 : 10; }
+      const pd = planDays(pl);
+      M.hours = {}; pd.forEach(x => { M.hours[x] = patHour(pl, x, { h, m }, med); });
+      const ds = pd.length ? pd : [d];
+      renderDays(ds);
+      $('#dhint').textContent = pd.length ? '(los del tratamiento; podés cambiarlos)' : '';
+      syncType(); updatePrev();
+      // Inicio propuesto: el primer día del esquema después de la última sesión (sin feriados ni agenda cancelada).
+      const tok = M.tid; const cd = chosenDays();
+      nextPlanDate(M.proId, pl, M.date, cd.length ? cd : ds, hourOf).then(dt => { if (M && M.tid === tok && f.from) { f.from.value = dt; updatePrev(); } });
+      return;
+    }
+    M.tid = null; M.hours = {}; f.count.max = maxCount(); if (sel) f.count.value = med ? 1 : 10;
+    renderDays([d]); f.from.value = M.date; $('#dhint').textContent = '';
     syncType(); updatePrev();
   };
   const refreshPlanBox = () => {
@@ -1480,7 +1533,7 @@ function openSlot(date, h, d, m, eid) {
     plink.hidden = false; plink.innerHTML = 'Paciente existente: sus datos se actualizan al guardar. <button type="button" class="btn ghost small" data-unlink>Desvincular</button>';
     sug.innerHTML = ''; refreshPlanBox();
   };
-  const unlink = () => { M.pid = null; M.tid = null; plink.hidden = true; planBox.innerHTML = ''; syncType(); updatePrev(); };
+  const unlink = () => { M.pid = null; M.tid = null; M.hours = {}; plink.hidden = true; planBox.innerHTML = ''; renderDays([d]); f.from.value = M.date; $('#dhint').textContent = ''; syncType(); updatePrev(); };
   const renderSug = () => {
     if (M.pid) { sug.innerHTML = ''; return; }
     const q = norm(f.name.value).trim(); if (q.length < 2) { sug.innerHTML = ''; return; }
@@ -1488,7 +1541,7 @@ function openSlot(date, h, d, m, eid) {
     sug.innerHTML = res.map(([id, p]) => `<button type="button" class="sugi" data-sug="${id}"><b>${esc(p.name)}</b><small>${esc([p.dni, p.insurance, planActive(p).length ? 'En tratamiento' : 'Sin tratamiento activo'].filter(Boolean).join(' · '))}</small></button>`).join('');
   };
   af.addEventListener('input', e => { if (e.target.name === 'name') renderSug(); if (e.target.name === 'count') updatePrev(); });
-  af.addEventListener('change', e => { if (e.target.name === 'd') updatePrev(); if (e.target.name === 'planSel') applyPlanSel(); if (e.target.name === 'stype' || e.target.name === 'freq') { syncType(); updatePrev(); } });
+  af.addEventListener('change', e => { if (e.target.name === 'd' || e.target.name === 'from') updatePrev(); if (e.target.name === 'planSel') applyPlanSel(); if (e.target.name === 'stype' || e.target.name === 'freq') { syncType(); updatePrev(); } });
   af.addEventListener('click', e => {
     const sg = e.target.closest('[data-sug]'); if (sg) link(sg.dataset.sug);
     if (e.target.closest('[data-unlink]')) unlink();
@@ -1501,7 +1554,7 @@ function openSlot(date, h, d, m, eid) {
   const FIELDS = ['name', 'dni', 'phone', 'insurance', 'affiliate', 'dx', 'note', 'count', 'stype', 'freq'];
   const saveDraft = () => {
     if (!M) return;
-    const v = { pid: M.pid, tid: M.tid, days: [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value), sob: !!(so && so.checked), ts: Date.now() };
+    const v = { pid: M.pid, tid: M.tid, days: chosenDays(), sob: !!(so && so.checked), ts: Date.now() };
     FIELDS.forEach(k => { if (f[k]) v[k] = f[k].value; });
     const typed = M.pid || ['name', 'dni', 'phone', 'insurance', 'affiliate', 'dx', 'note'].some(k => (v[k] || '').trim());
     Drafts.set(dk, typed ? v : null); M.draftChanged = true; note.hidden = !typed;
@@ -1528,23 +1581,25 @@ function openSlot(date, h, d, m, eid) {
     const only = firstOnly; firstOnly = false;
     if (!canEditAgenda(M.proId)) return toast('No tenés permiso sobre esta agenda.');
     const name = f.name.value.trim(); if (!name) return;
-    const chosen = [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+    const chosen = chosenDays();
     if (!chosen.length) return toast('Elegí al menos un día.');
+    const startDate = f.from.value; if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return toast('Elegí la fecha de inicio en el calendario.');
+    const hours = Object.fromEntries(chosen.map(x => [x, hourOf(x)]));
     const { type, spec } = chosenType();
     const count = Math.max(1, Math.min(maxCount(), parseInt(f.count.value, 10) || 1));
     const training = isTraining(), freq = type === 'entrenamiento' ? f.freq.value : null, practice = type === 'practica' ? practiceKey(spec) : null;
     if (training && freq !== 'libre' && chosen.length !== +freq) return toast(`Entrenamiento ${TRAINING_FREQ[freq]}: elegí ${freq} ${freq === '1' ? 'día' : 'días'} de la semana.`);
     const pact = !!(f.pact && f.pact.checked);
     let abs = null;
-    if (!only && !training && count > 1) { try { abs = await absenceCheck(M.proId, M.date, M.h, chosen, count); } catch (er) { abs = null; } }
+    if (!only && !training && count > 1) { try { abs = await absenceCheck(M.proId, startDate, M.h, chosen, count); } catch (er) { abs = null; } }
     if (abs && !pact && !(await confirmBox(absenceText(abs, pro, count) + ' ¿Agendar igual?', 'Igual agendar', 'Volver', 'Pausa de más de una semana', true))) return;
     const btn = af.querySelector('button[type=submit]'); btn.disabled = true;
     try {
-      const r = await addSessions({ pause: abs ? { from: abs.from, to: abs.to, days: abs.span, pact, by: S.me, at: Date.now() } : null, proId: M.proId, startDate: M.date, h: M.h, m: M.m, sob: !!(so && so.checked), days: chosen, count, pid: M.pid, tid: M.tid,
-        name, dni: f.dni.value.trim(), phone: f.phone.value.trim(), insurance: f.insurance.value.trim(), affiliate: f.affiliate.value.trim(), dx: f.dx.value.trim(), note: f.note.value.trim(), type, spec, freq, practice, until: training ? monthAfter(M.date) : null, firstOnly: only });
+      const r = await addSessions({ pause: abs ? { from: abs.from, to: abs.to, days: abs.span, pact, by: S.me, at: Date.now() } : null, proId: M.proId, startDate, h: M.h, m: M.m, hours, sob: !!(so && so.checked), days: chosen, count, pid: M.pid, tid: M.tid,
+        name, dni: f.dni.value.trim(), phone: f.phone.value.trim(), insurance: f.insurance.value.trim(), affiliate: f.affiliate.value.trim(), dx: f.dx.value.trim(), note: f.note.value.trim(), type, spec, freq, practice, until: training ? monthAfter(startDate) : null, firstOnly: only });
       if (!r.ok) toast('No se pudo agendar: los turnos están completos, fuera del horario o en días cerrados.');
       else if (only) toast('Primera sesión agendada. Tocala en la agenda para agendar las restantes.');
-      else toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
+      else toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}${r.first ? ' desde el ' + labelDate(r.first) : ''}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
       if (r.ok) { Drafts.set(dk, null); M.draftChanged = true; closeModal(); return; } // turno confirmado: se cierra
     } catch (er) { console.error(er); toast('No se pudo guardar. Revisá tu permiso de edición.'); }
     btn.disabled = false;
@@ -1625,8 +1680,14 @@ async function addSessions(o) {
   pt.plans = pt.plans || {}; pt.pros = pt.pros || [];
   if (!pt.pros.includes(o.proId)) pt.pros.push(o.proId);
   let tid = o.tid; let pl = tid && pt.plans[tid]; let count = o.count;
+  // Hora de cada día: la del esquema elegido (o.hours) o, si no viene, la del turno tocado.
+  const hourOf = d => (o.hours && o.hours[d]) || { h: o.h, m: med ? o.m : null };
+  const newPat = Object.fromEntries(o.days.map(d => { const x = hourOf(d); return [d, { h: x.h, m: med ? x.m : null }]; }));
+  // Continuación (de un tratamiento existente o uno nuevo que sigue a otro): se buscan los días del esquema desde la fecha
+  // de inicio, aunque sea una sola sesión, en vez de tomar esa fecha tal cual (que podría ser un sábado o un feriado).
+  const cont = !!pl || !!o.cont;
   if (pl) { count = Math.min(count, pl.total - pl.placed); if (count <= 0) return { ok: 0, skipped: 0 }; if (o.dx) pl.dx = o.dx; }
-  else { tid = 't' + uid(); pl = pt.plans[tid] = { proId: o.proId, total: count, placed: 0, recUsed: 0, dx: o.dx || '', status: 'activo', type: o.type || 'rehabilitacion', ...(o.spec ? { spec: o.spec } : {}), ...(o.freq ? { freq: o.freq } : {}), ...(o.practice ? { practice: o.practice } : {}), ...(o.until ? { until: o.until } : {}), ...(o.cont ? { cont: o.cont } : {}), start: o.startDate, created: now, pat: Object.fromEntries(o.days.map(d => [d, { h: o.h, m: med ? o.m : null }])) }; }
+  else { tid = 't' + uid(); pl = pt.plans[tid] = { proId: o.proId, total: count, placed: 0, recUsed: 0, dx: o.dx || '', status: 'activo', type: o.type || 'rehabilitacion', ...(o.spec ? { spec: o.spec } : {}), ...(o.freq ? { freq: o.freq } : {}), ...(o.practice ? { practice: o.practice } : {}), ...(o.until ? { until: o.until } : {}), ...(o.cont ? { cont: o.cont } : {}), start: o.startDate, created: now, pat: newPat }; }
   const fresh = !o.tid;
   const monthDates = () => [...candidates(o.startDate, o.days, 6)].filter(x => x.date < pl.until);
   let cands;
@@ -1638,29 +1699,33 @@ async function addSessions(o) {
     // Entrenamiento: todas las fechas de los días elegidos dentro del mes (lo que no entra se saltea).
     if (fresh) count = 999;
     cands = monthDates();
-  } else cands = count === 1 ? [{ d: parse(o.startDate).getDay(), date: o.startDate }] : candidates(o.startDate, o.days, weeksFor(count, o.days));
-  let ok = 0, skipped = 0, n = pl.placed, lastPlaced = '';
+  } else cands = count === 1 && !cont ? [{ d: parse(o.startDate).getDay(), date: o.startDate }] : candidates(o.startDate, o.days, weeksFor(count, o.days));
+  let ok = 0, skipped = 0, n = pl.placed, lastPlaced = '', firstPlaced = '';
   let curWk = null, curDoc = null, curId = null, changed = false;
   const flush = async () => { if (curDoc && changed) await Store.setAgenda(curId, curDoc); changed = false; };
   for (const { d, date } of cands) {
     if (ok >= count) break;
     const wk = mondayKey(date);
     if (wk !== curWk) { await flush(); curWk = wk; curId = wk + '_' + o.proId; curDoc = (await Store.getAgenda(curId)) || { week: wk, proId: o.proId, slots: {} }; curDoc.slots = curDoc.slots || {}; }
-    const key = slotKey(date, o.h, med ? o.m : null); const arr = curDoc.slots[key] || [];
+    const hr = hourOf(d); const key = slotKey(date, hr.h, med ? hr.m : null); const arr = curDoc.slots[key] || [];
     const occ = arr.filter(occupies); const reg = occ.filter(p => !p.sob).length, sobN = occ.length - reg;
-    const fits = med ? (o.sob ? sobN < S.cfg.sobre : reg < 1) : occ.length < capAt(pro, o.h);
-    if (!works(pro, d, o.h) || isClosed(date) || blockAt(curDoc, date, o.h) || !fits) { skipped++; continue; }
+    const fits = med ? (o.sob ? sobN < S.cfg.sobre : reg < 1) : occ.length < capAt(pro, hr.h);
+    if (!works(pro, d, hr.h) || isClosed(date) || blockAt(curDoc, date, hr.h) || !fits) { skipped++; continue; }
     n++;
     const entry = { id: uid(), name: o.name, phone: o.phone, note: o.note, pid, tid, n, series: tid, status: 'prog', by: S.me };
     if (med && o.sob) entry.sob = true;
-    arr.push(entry); curDoc.slots[key] = arr; ok++; changed = true; if (date > lastPlaced) lastPlaced = date;
+    arr.push(entry); curDoc.slots[key] = arr; ok++; changed = true; if (date > lastPlaced) lastPlaced = date; if (!firstPlaced || date < firstPlaced) firstPlaced = date;
   }
   await flush();
   if (pl.until && !fresh && !o.firstOnly) pl.total = (pl.placed || 0) + ok; // restantes del pase: lo que entró
   if (pl.until && fresh && !o.firstOnly) pl.total = ok; // el pase del mes queda con las sesiones que se pudieron cargar
   if (ok > 0 && o.pause) { pl.pauses = (pl.pauses || []).filter(x => x.from !== o.pause.from); pl.pauses.push(o.pause); }
-  if (ok > 0) { pl.placed += ok; if (lastPlaced > (pl.lastDate || '')) pl.lastDate = lastPlaced; await Store.setPatient(pid, pt); }
-  return { ok, skipped, pid };
+  if (ok > 0) {
+    pl.placed += ok; if (lastPlaced > (pl.lastDate || '')) pl.lastDate = lastPlaced;
+    if (o.tid && !o.firstOnly) pl.pat = newPat;   // si se cambiaron los días, queda el nuevo esquema del tratamiento
+    await Store.setPatient(pid, pt);
+  }
+  return { ok, skipped, pid, first: firstPlaced };
 }
 
 /* ---- sesiones restantes y continuación, desde una sesión ya agendada ---- */
@@ -1674,34 +1739,74 @@ async function seriesModal(kind, ent, ctx) {
   const after = d => fmt(addDays(parse(d), 1));
   const base = kind === 'rest' ? [ctx.date, pl.lastDate || ''].sort().pop() : ctx.date;
   const start = kind === 'cont' && training && pl.until && pl.until > ctx.date ? pl.until : after(base);
-  const until = training ? (kind === 'rest' ? pl.until : monthAfter(start)) : null;
-  const patDays = Object.keys(pl.pat || {}).map(Number);
-  const days = ORDER.filter(x => S.cfg.days.includes(x));
+  const untilFor = from => training ? (kind === 'rest' ? pl.until : monthAfter(from)) : null;
+  const patDays = planDays(pl);
+  const days = ORDER.filter(x => S.cfg.days.includes(x) || patDays.includes(x));
   const pre = patDays.length ? patDays : [parse(ctx.date).getDay()];
+  // Cada día se agenda a la hora de su esquema (misma hora de siempre); un día nuevo, a la hora de esta sesión.
+  const hourOf = x => patHour(pl, x, { h: ctx.h, m: ctx.m }, med);
+  const fmtH = x => { const o = hourOf(x); return med ? tm(o.h, o.m) : hh(o.h); };
+  const sameH = patDays.every(x => { const o = hourOf(x); return o.h === hourOf(pre[0]).h && (!med || o.m === hourOf(pre[0]).m); });
   const unit = med ? 'consultas' : 'sesiones';
   const title = kind === 'rest' ? 'Agendar sesiones restantes' : 'Agendar continuación';
   openModal(`<button class="btn ghost small close" data-close>Cerrar</button><h2>${title}</h2>
-    <p class="sub">${esc(pt.name)} · ${esc(planTypeText(pl) || pl.dx || 'Tratamiento')} · ${med ? tm(ctx.h, ctx.m) : hh(ctx.h)} h · desde el ${esc(labelDate(start))}</p>
+    <p class="sub">${esc(pt.name)} · ${esc(planTypeText(pl) || pl.dx || 'Tratamiento')}${sameH ? ` · ${fmtH(pre[0])} h` : ''}</p>
     <form id="sf" autocomplete="off">
-      ${training ? `<p class="hint">${kind === 'rest' ? 'Se cargan las sesiones que faltan del pase' : 'Se carga el mes siguiente del pase'} (${esc(TRAINING_FREQ[pl.freq] || '')}), hasta el ${esc(labelDate(fmt(addDays(parse(until), -1))))}.</p>`
+      ${training ? `<p class="hint" id="trh"></p>`
         : `<label class="fld"><span>Cantidad de ${unit}</span><input type="number" name="count" min="1" max="${kind === 'rest' ? left : pl.type === 'practica' ? 999 : 60}" value="${kind === 'rest' ? left : pl.total}" inputmode="numeric" style="max-width:140px"></label>`}
-      <div class="fld"><span>Días de la semana</span>
-        <div class="chips">${days.map(x => `<label class="chip"><input type="checkbox" name="d" value="${x}" ${pre.includes(x) ? 'checked' : ''} ${works(pro, x, ctx.h) ? '' : 'disabled'}><span>${DAYS_S[x]}</span></label>`).join('')}</div></div>
+      <div class="fld"><span>Desde <small>(tocá para abrir el calendario)</small></span>
+        <div class="dpick"><input type="date" name="from" value="${start}" required></div></div>
+      <div class="fld"><span>Días de la semana ${patDays.length ? '<small>(los del tratamiento; podés cambiarlos)</small>' : ''}</span>
+        <div class="chips">${days.map(x => { const ok = works(pro, x, hourOf(x).h); return `<label class="chip"><input type="checkbox" name="d" value="${x}" ${pre.includes(x) && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}><span>${DAYS_S[x]}${sameH ? '' : `<small>${fmtH(x)}</small>`}</span></label>`; }).join('')}</div>
+        <small id="sprev"></small></div>
       <button class="btn" type="submit">${title}</button>
     </form>`);
   $('#modal').onclick = e => { if (e.target.matches('[data-scrim]') || e.target.closest('[data-close]')) closeModal(); };
   const f = $('#sf');
+  const chosenDays = () => [...f.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+  const fromDate = () => (/^\d{4}-\d{2}-\d{2}$/.test(f.elements.from.value) ? f.elements.from.value : start);
+  const prev = () => {
+    const out = $('#sprev'); if (!out) return; const ds = chosenDays(); const from = fromDate();
+    if (!ds.length) { out.textContent = 'Elegí al menos un día.'; return; }
+    const dl = ds.map(x => `${DAYS_S[x]} ${fmtH(x)}`).join(', ');
+    if (training) {
+      const u = untilFor(from); const n2 = [...candidates(from, ds, 6)].filter(x => x.date < u);
+      const th = $('#trh'); if (th) th.textContent = `${kind === 'rest' ? 'Se cargan las sesiones que faltan del pase' : 'Se carga el mes siguiente del pase'} (${TRAINING_FREQ[pl.freq] || ''}), hasta el ${labelDate(fmt(addDays(parse(u), -1)))}.`;
+      out.textContent = n2.length ? `Los ${dl}. La primera cae el ${labelDate(n2[0].date)} y la última aprox. el ${labelDate(n2[n2.length - 1].date)}.` : 'No hay fechas disponibles con esos días.';
+      return;
+    }
+    const n = Math.max(1, parseInt(f.elements.count.value, 10) || 1);
+    let first = null, last = from, c = 0;
+    for (const x of candidates(from, ds, weeksFor(n, ds))) { c++; if (!first) first = x.date; last = x.date; if (c >= n) break; }
+    if (!first) { out.textContent = 'No hay fechas disponibles con esos días.'; return; }
+    out.textContent = n === 1 ? `Se agenda 1 ${med ? 'consulta' : 'sesión'} el ${labelDate(first)} (${dl}).`
+      : `Se agendan ${n} ${unit} los ${dl}. La primera cae el ${labelDate(first)} y la última aprox. el ${labelDate(last)}.`;
+  };
+  f.elements.from.addEventListener('click', () => { try { f.elements.from.showPicker && f.elements.from.showPicker(); } catch (er) {} });
+  f.addEventListener('change', prev); f.addEventListener('input', e => { if (e.target.name === 'count') prev(); });
+  prev();
+  // Inicio propuesto: el primer día del esquema (no el día siguiente a secas, que puede ser sábado), salteando feriados
+  // y días con la agenda cancelada. En el pase de entrenamiento se arranca donde termina el pase actual.
+  if (!(kind === 'cont' && training && pl.until && pl.until > ctx.date)) {
+    nextPlanDate(ctx.proId, kind === 'rest' ? pl : null, start, pre, hourOf).then(dt => {
+      if (f.isConnected && !f.dataset.touched) { f.elements.from.value = dt; prev(); }
+    });
+  }
+  f.elements.from.addEventListener('change', () => { f.dataset.touched = '1'; });
   f.onsubmit = async e => {
     e.preventDefault();
-    const chosen = [...f.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
+    const chosen = chosenDays();
     if (!chosen.length) return toast('Elegí al menos un día.');
+    const start = f.elements.from.value; if (!/^\d{4}-\d{2}-\d{2}$/.test(start)) return toast('Elegí la fecha de inicio en el calendario.');
+    const until = untilFor(start);
+    const hours = Object.fromEntries(chosen.map(x => [x, hourOf(x)]));
     if (training && pl.freq && pl.freq !== 'libre' && chosen.length !== +pl.freq) return toast(`Entrenamiento ${TRAINING_FREQ[pl.freq]}: elegí ${pl.freq} ${pl.freq === '1' ? 'día' : 'días'} de la semana.`);
     const count = training ? 999 : Math.max(1, Math.min(+f.count.max, parseInt(f.count.value, 10) || 1));
     let abs = null;
     if (!training && count > 1) { try { abs = await absenceCheck(ctx.proId, start, ctx.h, chosen, count); } catch (er) { abs = null; } }
     if (abs && !(await confirmBox(absenceText(abs, pro, count) + ' ¿Agendar igual?', 'Igual agendar', 'Volver', 'Pausa de más de una semana', true))) return;
     const btn = f.querySelector('button[type=submit]'); btn.disabled = true;
-    const common = { pause: abs ? { from: abs.from, to: abs.to, days: abs.span, pact: false, by: S.me, at: Date.now() } : null, proId: ctx.proId, startDate: start, h: ctx.h, m: ctx.m, days: chosen, count, pid: ent.pid,
+    const common = { pause: abs ? { from: abs.from, to: abs.to, days: abs.span, pact: false, by: S.me, at: Date.now() } : null, proId: ctx.proId, startDate: start, h: ctx.h, m: ctx.m, hours, days: chosen, count, pid: ent.pid,
       name: pt.name, dni: pt.dni, phone: pt.phone, insurance: pt.insurance, affiliate: pt.affiliate, note: '' };
     try {
       const r = kind === 'rest'
@@ -1709,7 +1814,7 @@ async function seriesModal(kind, ent, ctx) {
         : await addSessions({ ...common, tid: null, cont: ent.tid, dx: pl.dx, type: pl.type, spec: pl.spec, freq: pl.freq, practice: pl.practice, until });
       if (!r.ok) { toast('No se pudo agendar: los turnos están completos, fuera del horario o en días cerrados.'); btn.disabled = false; return; }
       closeModal();
-      toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
+      toast(`${r.ok} ${r.ok === 1 ? 'sesión agendada' : 'sesiones agendadas'}${r.first ? ' desde el ' + labelDate(r.first) : ''}` + (r.skipped ? ` · ${r.skipped} fechas salteadas (completas o fuera de horario)` : ''));
     } catch (er) { console.error(er); toast('No se pudo guardar. Revisá tu permiso de edición.'); btn.disabled = false; }
   };
 }
@@ -2060,6 +2165,7 @@ function patientModal(pid) {
         <div class="row2">
           <label class="fld"><span>Sesiones totales <small>(${pl.placed || 0} agendadas)</small></span><input type="number" name="tot_${tid}" min="1" max="200" value="${pl.total}"></label>
           <label class="fld"><span>Recuperos usados <small>(máx. ${S.cfg.maxRec})</small></span><input type="number" name="rec_${tid}" min="0" max="${S.cfg.maxRec}" value="${pl.recUsed || 0}"></label></div>
+        ${pl.status === 'activo' ? `<div class="fld"><span>Días de atención <small>(se usan al continuar y al reprogramar)</small></span><div class="chips">${ORDER.filter(x => S.cfg.days.includes(x) || (pl.pat && pl.pat[x])).map(x => `<label class="chip"><input type="checkbox" name="pd_${tid}" value="${x}" ${pl.pat && pl.pat[x] ? 'checked' : ''}><span>${DAYS_S[x]}</span></label>`).join('')}</div></div>` : ''}
         <label class="fld"><span>Se factura en</span><select name="bm_${tid}">${billMonthOptionsHTML(pl, fmt(nowBA()).slice(0, 7))}</select></label>
         <label class="fld" style="margin-bottom:0"><span>Estado</span><select name="st_${tid}"><option value="activo"${pl.status === 'activo' ? ' selected' : ''}>En curso</option><option value="finalizado"${pl.status !== 'activo' ? ' selected' : ''}>Finalizado</option></select></label></div>`).join('')}
       ${isNew ? '' : `<div class="lbl" style="margin:10px 0 6px">Historia clínica</div>
@@ -2116,6 +2222,13 @@ function patientModal(pid) {
         pl.recUsed = Math.max(0, Math.min(S.cfg.maxRec, parseInt(f['rec_' + tid].value, 10) || 0));
         pl.status = f['st_' + tid].value;
         pl.billMonth = f['bm_' + tid].value || null;
+        // Días de atención: los días nuevos toman la hora de los que ya tenía el esquema.
+        const pdIn = [...e.target.querySelectorAll(`input[name="pd_${tid}"]`)];
+        const pds = pdIn.filter(x => x.checked).map(x => +x.value);
+        if (pdIn.length && pds.length) {
+          const old = pl.pat || {}; const base = Object.values(old)[0] || { h: S.cfg.open, m: null };
+          pl.pat = Object.fromEntries(pds.map(x => [x, old[x] || { h: base.h, m: base.m == null ? null : base.m }]));
+        }
       });
       // Historia clínica: se editan las notas propias (o todas, desde administración); vacía = se borra.
       if (Array.isArray(cur.history)) cur.history = cur.history.map(n => { const el = f['hn_' + n.id]; return el ? { ...n, text: el.value.trim() } : n; }).filter(n => (n.text || '').trim());
