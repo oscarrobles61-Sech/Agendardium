@@ -2,12 +2,14 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { Forbidden } from './access';
 import { currentUser, type Me } from './auth';
 import { BadRequest, hasDb } from './db';
+import { Conflict } from './store';
 
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { 'cache-control': 'no-store' } });
 
 function fail(e: unknown) {
   if (e instanceof BadRequest) return json({ error: e.message }, 400);
   if (e instanceof Forbidden) return json({ error: e.message }, 403);
+  if (e instanceof Conflict) return json({ error: e.message, conflict: true }, 409);
   console.error(e);
   return json({ error: 'error de base de datos' }, 500);
 }
@@ -26,7 +28,7 @@ export function authed(fn: (req: NextRequest, me: Me) => Promise<unknown>) {
     if (!hasDb()) return json({ error: 'DATABASE_URL no está configurada' }, 503);
     try {
       const me = await currentUser(req);
-      if (!me) return json({ error: 'Tenés que ingresar con tu DNI.' }, 401);
+      if (!me) return json({ error: 'Tenés que ingresar con tu DNI y PIN.' }, 401);
       return json(await fn(req, me));
     } catch (e) { return fail(e); }
   };

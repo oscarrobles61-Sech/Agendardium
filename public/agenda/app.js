@@ -126,6 +126,7 @@ const slotKey = (date, h, m) => m == null ? date + '_' + h : date + '_' + h + '_
 /* ================= almacenamiento ================= */
 const Store = (() => {
   let db = null, mode = 'local';
+  const agRev = new WeakMap(), agNew = {};
   const L = { cfg: null, users: {}, agenda: {}, patients: {}, billing: {}, news: {}, backups: {}, meta: {} };
   const listeners = new Set();
   try { const raw = localStorage.getItem('kine_local_v1'); if (raw) Object.assign(L, JSON.parse(raw)); } catch (e) {}
@@ -232,11 +233,26 @@ const Store = (() => {
       return clone((L.billing || {})[id] || null);
     },
     async setBilling(id, d) { if (db) return db.doc('billing/' + id).set(d); L.billing = L.billing || {}; L.billing[id] = clone(d); persist(); notify(); },
+    // Agenda con control de escritura simultánea: cada semana leída recuerda su revisión (pegada al objeto que se
+    // devuelve) y al guardar ese mismo objeto se manda. Si otra persona guardó esa semana en el medio, el servidor
+    // rechaza (409) en vez de pisar sus turnos; la vista se actualiza sola y se avisa para volver a intentar
+    // (al reintentar, la acción vuelve a leer la semana). Una semana nueva (leída vacía) solo se crea si sigue vacía.
     async getAgenda(id) {
-      if (db) { const s = await db.doc('agenda/' + id).get(); return s.exists ? clone(s.data()) : null; }
+      if (db) {
+        const s = await db.doc('agenda/' + id).get();
+        if (!s.exists) { agNew[id] = s.rev || 0; return null; }
+        const d = clone(s.data()); agRev.set(d, s.rev || 0); return d;
+      }
       return clone(L.agenda[id] || null);
     },
-    async setAgenda(id, d) { if (db) return db.doc('agenda/' + id).set(d); L.agenda[id] = clone(d); persist(); notify(); }
+    async setAgenda(id, d) {
+      if (db) {
+        const ifRev = agRev.has(d) ? agRev.get(d) : (agNew[id] || 0);
+        try { const r = await db.doc('agenda/' + id).set(d, { ifRev }); agRev.set(d, (r && r.rev) || 0); delete agNew[id]; return; }
+        catch (e) { if (e && e.status === 409) conflictToast(e.message); throw e; }
+      }
+      L.agenda[id] = clone(d); persist(); notify();
+    }
   };
 })();
 
@@ -437,11 +453,29 @@ function* candidates(startDate, days, maxWeeks) {
 // El ingreso es con DNI (texto plano). Se compara sin puntos ni espacios.
 const normDni = v => String(v || '').replace(/[^0-9a-z]/gi, '').toUpperCase();
 const DNI_OK = /^[0-9A-Z]{6,12}$/;
+// PIN de acceso (segunda credencial): 6 a 8 números. El servidor además rechaza los muy fáciles.
+const PIN_OK = /^\d{6,8}$/;
+const pinFieldsHTML = (label, hint) => `
+      <label class="fld"><span>${label} <small>${hint || '(6 a 8 números)'}</small></span><input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="new-password" required></label>
+      <label class="fld"><span>Repetí el PIN</span><input type="password" name="pin2" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="new-password" required></label>`;
+function readNewPin(f) {
+  const pin = f.pin.value.trim();
+  if (!PIN_OK.test(pin)) throw new Error('El PIN tiene que tener entre 6 y 8 números.');
+  if (pin !== f.pin2.value.trim()) throw new Error('Los dos PIN no coinciden.');
+  return pin;
+}
 const dniTaken = (dni, exceptId) => Object.entries(S.users).some(([id, u]) => id !== exceptId && normDni(u.dni) === dni);
 
 function toast(msg) {
+  // Si la escritura falló porque otra persona guardó la misma semana, el aviso genérico ("No se pudo…") se
+  // reemplaza por la explicación del conflicto, que es lo que le sirve a quien está cargando.
+  if (Date.now() - (toast.conflictAt || 0) < 2500 && /^No se pud/.test(msg)) { msg = toast.conflictMsg; toast.conflictAt = 0; }
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), 3200);
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), /^Otra persona/.test(msg) ? 7000 : 3200);
+}
+function conflictToast(msg) {
+  toast.conflictMsg = msg || 'Otra persona cambió esta agenda al mismo tiempo. Ya se actualizó con lo último: revisá y volvé a intentarlo.';
+  toast(toast.conflictMsg); toast.conflictAt = Date.now();
 }
 
 // Cupo de una hora: el del centro, salvo que el profesional lo haya bajado para esa hora (1 a cupo del centro).
@@ -496,7 +530,7 @@ function confirmBox(msg, okLabel, noLabel, title, primary) {
 let unsubCfg = null, unsubUsers = null;
 async function boot() {
   await Store.init();
-  window.addEventListener('agenda:sin-sesion', () => { if (S.me) { logout(); toast('Tu sesión terminó. Ingresá de nuevo con tu DNI.'); } });
+  window.addEventListener('agenda:sin-sesion', () => { if (S.me) { logout(); toast('Tu sesión terminó. Ingresá de nuevo con tu DNI y PIN.'); } });
   if (Store.auth) {
     try { S.auth = await Store.auth.state(); }
     catch (e) { app.innerHTML = '<div class="empty"><h2>No se pudo conectar con la agenda. Recargá la página.</h2></div>'; return; }
@@ -546,11 +580,12 @@ function render() {
   if (!unsubPat) unsubPat = Store.watchPatients(map => { S.patients = map; if (S.tab === 'patients') renderPatientList(); if (S.tab === 'home') renderReminders(); refreshSlot(); });
   renderView(false);
   startAvisos();
+  usoAlert();
 }
 
 function logout(silent) {
   stopAvisos();
-  S.me = null; S.sig = ''; S.tab = 'home'; S.proId = null; S.pruned = false;
+  S.me = null; S.sig = ''; S.tab = 'home'; S.proId = null; S.pruned = false; S.pins = null; S.uso = null; usoAlert.done = false;
   if (unsubAg) { unsubAg(); unsubAg = null; } agKey = '';
   stopBackupTimer();
   if (unsubPat) { unsubPat(); unsubPat = null; } S.patients = {};
@@ -579,6 +614,7 @@ function viewSetup() {
     <form id="sf" autocomplete="off">
       <label class="fld"><span>Tu nombre</span><input type="text" name="name" required></label>
       <label class="fld"><span>Tu DNI <small>(lo vas a usar para ingresar)</small></span><input type="text" name="dni" inputmode="numeric" maxlength="15" required></label>
+      ${Store.auth ? pinFieldsHTML('Elegí tu PIN', '(6 a 8 números: lo vas a pedir junto con el DNI)') : ''}
       <p class="err" id="ferr"></p>
       <button class="btn" type="submit">Crear y entrar</button>
     </form></section></main>`;
@@ -587,7 +623,7 @@ function viewSetup() {
     const f = e.target; const dni = normDni(f.dni.value);
     if (!DNI_OK.test(dni)) { $('#ferr').textContent = 'Revisá el DNI: tiene que tener entre 6 y 12 números.'; return; }
     if (Store.auth) {
-      try { const r = await Store.auth.setup(f.name.value.trim(), dni, Object.assign({}, DEFAULT_CFG)); enter(r.id); }
+      try { const r = await Store.auth.setup(f.name.value.trim(), dni, readNewPin(f), Object.assign({}, DEFAULT_CFG)); enter(r.id); }
       catch (er) { $('#ferr').textContent = er.message || 'No se pudo guardar.'; }
       return;
     }
@@ -612,6 +648,7 @@ function viewLogin() {
     ${Store.mode === 'local' ? '<p class="banner">Modo local: los datos se guardan solo en este navegador.</p>' : ''}
     <form id="lf" autocomplete="off">
       <label class="fld"><span>DNI</span><input type="text" name="dni" inputmode="numeric" maxlength="15" required autofocus></label>
+      ${Store.auth ? `<label class="fld"><span>PIN <small>(si todavía no tenés, dejalo vacío y lo creás ahora)</small></span><input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="current-password"></label>` : ''}
       <p class="err" id="ferr"></p>
       <button class="btn" type="submit">Ingresar</button>
     </form></section></main>`;
@@ -620,13 +657,41 @@ function viewLogin() {
     const dni = normDni(e.target.dni.value);
     if (Store.auth) {
       const btn = e.target.querySelector('button'); btn.disabled = true;
-      try { const r = await Store.auth.login(dni); enter(r.id); }
+      try {
+        const r = await Store.auth.login(dni, e.target.pin.value.trim());
+        if (r.step) return viewNewPin(r.ticket, r.step, r.name);
+        enter(r.id);
+      }
       catch (er) { $('#ferr').textContent = er.message || 'No se pudo ingresar.'; btn.disabled = false; }
       return;
     }
     const found = dni ? Object.entries(S.users).filter(([, u]) => normDni(u.dni) === dni) : [];
     if (found.length === 1) enter(found[0][0]);
     else { $('#ferr').textContent = found.length ? 'Hay más de un perfil con ese DNI. Pedile a la secretaría que lo corrija.' : 'No hay ningún perfil con ese DNI.'; }
+  };
+}
+
+// Crear el PIN propio: la primera vez (todavía no tenía) o después de entrar con un PIN temporal de la secretaría.
+function viewNewPin(ticket, step, name) {
+  const first = step === 'create';
+  app.innerHTML = `<main class="auth"><section class="panel">
+    ${brandLogo()}
+    <h1>${first ? 'Creá tu PIN' : 'Elegí tu PIN'}</h1>
+    <p class="lead">${name ? esc(name) + ': ' : ''}${first
+      ? 'para que nadie pueda entrar solo con tu DNI, ahora la agenda también pide un PIN. Elegí uno que recuerdes y no compartas.'
+      : 'entraste con un PIN temporal. Elegí tu PIN propio para seguir.'}</p>
+    <form id="pf" autocomplete="off">
+      ${pinFieldsHTML('PIN nuevo')}
+      <p class="hint">No uses números repetidos (111111), en escalera (123456) ni parte de tu DNI.</p>
+      <p class="err" id="ferr"></p>
+      <button class="btn" type="submit">Guardar y entrar</button>
+      <button class="btn ghost" type="button" id="pback">Volver</button>
+    </form></section></main>`;
+  $('#pback').onclick = () => viewLogin();
+  $('#pf').onsubmit = async e => {
+    e.preventDefault(); const btn = e.target.querySelector('button[type=submit]');
+    try { const pin = readNewPin(e.target); btn.disabled = true; const r = await Store.auth.setPin({ ticket, pin }); toast('PIN guardado'); enter(r.id); }
+    catch (er) { $('#ferr').textContent = er.message || 'No se pudo guardar.'; btn.disabled = false; }
   };
 }
 
@@ -641,6 +706,7 @@ function viewClaimDni() {
     <form id="cf" autocomplete="off">
       <label class="fld"><span>Perfil</span><select name="u">${list.map(([id, u]) => `<option value="${id}">${esc(u.name)} (${esc(roleText(u))})</option>`).join('')}</select></label>
       <label class="fld"><span>Tu DNI</span><input type="text" name="dni" inputmode="numeric" maxlength="15" required></label>
+      ${Store.auth ? pinFieldsHTML('Elegí tu PIN') : ''}
       <p class="err" id="ferr"></p>
       <button class="btn" type="submit">Guardar y entrar</button>
     </form></section></main>`;
@@ -649,7 +715,7 @@ function viewClaimDni() {
     const id = e.target.u.value, u = S.users[id], dni = normDni(e.target.dni.value);
     if (!DNI_OK.test(dni)) { $('#ferr').textContent = 'Revisá el DNI: tiene que tener entre 6 y 12 números.'; return; }
     if (Store.auth) {
-      try { const r = await Store.auth.claim(id, dni); enter(r.id); }
+      try { const r = await Store.auth.claim(id, dni, readNewPin(e.target)); enter(r.id); }
       catch (er) { $('#ferr').textContent = er.message || 'No se pudo guardar.'; }
       return;
     }
@@ -3184,15 +3250,63 @@ function bindUserForm(id, isNew, opts) {
 
 function viewTeam() {
   const list = Object.entries(S.users).sort((a, b) => (isAdminU(a[1]) === isAdminU(b[1]) ? byName(a, b) : isAdminU(a[1]) ? -1 : 1));
+  const P = S.pins; // estado de los PIN (solo con base de datos; se carga aparte)
+  const pinBadge = id => {
+    if (!P) return '';
+    const x = P.users[id] || {};
+    if (x.lockedMin) return `<span class="badge med">Bloqueado ${x.lockedMin} min</span>`;
+    if (!x.hasPin) return '<span class="badge med">Sin PIN</span>';
+    return x.temp ? '<span class="badge">PIN temporal</span>' : '';
+  };
+  const pinBtns = id => {
+    if (!P || id === S.me) return '';
+    const x = P.users[id] || {};
+    return `${x.lockedMin ? `<button class="btn ghost small" data-unlock="${id}">Desbloquear</button>` : ''}<button class="btn ghost small" data-temppin="${id}">${x.hasPin ? 'Restablecer PIN' : 'Generar PIN'}</button>`;
+  };
+  const withPin = P ? list.filter(([id]) => (P.users[id] || {}).hasPin).length : 0;
   $('#view').innerHTML = `<section class="panel">
     <div class="head-row"><h2>Equipo</h2><button class="btn" id="addu">Agregar integrante</button></div>
-    <p class="hint">Cada profesional entra con su DNI y trabaja con su propia agenda, sus horarios y sus pacientes: no ve ni modifica lo de los demás. Administración y secretaría ven y editan todo. Una persona puede tener más de un perfil.</p>
-    ${list.map(([id, u]) => `<div class="person"><div style="display:flex;gap:12px;align-items:center">${avatarHTML(u, 46)}<div><h3>${esc(u.name)}${profilesOf(u).map(r => `<span class="badge ${ADMIN_ROLES.includes(r) ? 'sec' : r === 'medico' ? 'med' : ''}">${esc(ROLE_LABEL[r] || r)}</span>`).join('')}</h3>
+    <p class="hint">Cada profesional entra con su DNI y su PIN y trabaja con su propia agenda, sus horarios y sus pacientes: no ve ni modifica lo de los demás. Administración y secretaría ven y editan todo. Una persona puede tener más de un perfil.</p>
+    ${P ? `<div class="banner" style="display:block"><b>PIN de acceso: ${withPin} de ${list.length} ya lo crearon.</b>
+      ${P.required ? ' Se exige PIN a todos: quien no tenga, necesita que le generes uno temporal.' : ' Quien todavía no tiene lo crea la próxima vez que entra con su DNI. Cuando estén todos, activá “Exigir PIN” para que nadie pueda entrar solo con el DNI.'}
+      <label class="chk-line" style="margin-top:8px"><input type="checkbox" id="pinreq" ${P.required ? 'checked' : ''}><span>Exigir PIN a todos</span></label></div>` : ''}
+    ${list.map(([id, u]) => `<div class="person"><div style="display:flex;gap:12px;align-items:center">${avatarHTML(u, 46)}<div><h3>${esc(u.name)}${profilesOf(u).map(r => `<span class="badge ${ADMIN_ROLES.includes(r) ? 'sec' : r === 'medico' ? 'med' : ''}">${esc(ROLE_LABEL[r] || r)}</span>`).join('')}${pinBadge(id)}</h3>
       ${u.title ? `<p>${esc(u.title)}</p>` : ''}${(u.roles || []).length ? `<p>Especialidades: ${esc(u.roles.join(', '))}</p>` : ''}<p>${esc(schedSummary(u))}</p></div></div>
-      <button class="btn ghost small" data-edit="${id}">Editar</button></div>`).join('')}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${pinBtns(id)}<button class="btn ghost small" data-edit="${id}">Editar</button></div></div>`).join('')}
   </section>`;
   $('#addu').onclick = () => editUserModal(null);
-  $('#view').onclick = e => { const b = e.target.closest('[data-edit]'); if (b) editUserModal(b.dataset.edit); };
+  const reload = () => loadPins().then(() => { if (S.tab === 'team') viewTeam(); });
+  if (Store.auth && (!P || Date.now() - P.at > 10000) && Date.now() - (loadPins.at || 0) > 15000) reload();
+  const req = $('#pinreq');
+  if (req) req.onchange = async () => {
+    const on = req.checked, sinPin = list.length - withPin;
+    if (on && sinPin && !(await confirmBox(`${sinPin === 1 ? 'Una persona todavía no tiene' : sinPin + ' personas todavía no tienen'} PIN: no van a poder entrar hasta que les generes uno temporal.`, 'Exigir igual', 'Cancelar', 'Exigir PIN a todos', true))) { req.checked = false; return; }
+    try { await Store.auth.pinAction({ action: 'require', value: on }); toast(on ? 'Ahora se exige PIN a todos' : 'PIN opcional: quien no tenga lo crea al entrar'); reload(); }
+    catch (er) { req.checked = !on; toast(er.message || 'No se pudo guardar.'); }
+  };
+  $('#view').onclick = async e => {
+    const b = e.target.closest('[data-edit]'); if (b) return editUserModal(b.dataset.edit);
+    const un = e.target.closest('[data-unlock]');
+    if (un) { try { await Store.auth.pinAction({ action: 'unlock', id: un.dataset.unlock }); toast('Ingreso desbloqueado'); reload(); } catch (er) { toast(er.message || 'No se pudo desbloquear.'); } return; }
+    const tp = e.target.closest('[data-temppin]');
+    if (tp) {
+      const id = tp.dataset.temppin, u = S.users[id] || {}, had = ((P && P.users[id]) || {}).hasPin;
+      if (!(await confirmBox(`Se genera un PIN temporal para ${u.name}${had ? '. Su PIN actual deja de servir y se cierran sus sesiones abiertas' : ''}. Al entrar con él va a tener que elegir uno propio.`, 'Generar', 'Cancelar', had ? 'Restablecer PIN' : 'Generar PIN', true))) return;
+      try {
+        const r = await Store.auth.pinAction({ action: 'temp', id });
+        openModal(`<button class="btn ghost small close" data-close>Cerrar</button><h2>PIN temporal de ${esc(u.name)}</h2>
+          <p class="sub">Dáselo en persona o por un medio privado. Sirve para entrar una vez: ahí elige su PIN propio. Esta es la única vez que se muestra.</p>
+          <p style="font-size:34px;font-weight:700;letter-spacing:6px;text-align:center;margin:18px 0">${esc(r.pin)}</p>
+          <div class="actions"><button class="btn" data-close>Listo</button></div>`);
+        reload();
+      } catch (er) { toast(er.message || 'No se pudo generar el PIN.'); }
+    }
+  };
+}
+async function loadPins() {
+  if (!Store.auth || !isSec()) return;
+  loadPins.at = Date.now();
+  try { S.pins = Object.assign(await Store.auth.pins(), { at: Date.now() }); } catch (e) { S.pins = null; }
 }
 
 function editUserModal(id) {
@@ -3209,8 +3323,22 @@ function viewProfile() {
   const u = S.users[S.me];
   $('#view').innerHTML = `<section class="panel"><h2>Mi perfil</h2>
     <p class="hint">Definí tus días y horas de trabajo. En esas franjas se te pueden asignar pacientes; el resto queda cerrado en tu agenda.</p>
-    ${userFormHTML(u, false, false)}</section>`;
+    ${userFormHTML(u, false, false)}</section>
+    ${Store.auth ? `<section class="panel" style="margin-top:14px"><h2>Cambiar mi PIN</h2>
+      <p class="hint">Con el PIN y tu DNI entrás a la agenda. Al cambiarlo se cierran tus sesiones en otros dispositivos.</p>
+      <form id="cpf" autocomplete="off">
+        <label class="fld"><span>PIN actual</span><input type="password" name="cur" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="current-password"></label>
+        ${pinFieldsHTML('PIN nuevo')}
+        <p class="err" id="cperr"></p>
+        <button class="btn" type="submit">Cambiar PIN</button>
+      </form></section>` : ''}`;
   bindUserForm(S.me, false, { onDone: () => { S.sig = ''; render(); renderView(true); } });
+  const cpf = $('#cpf');
+  if (cpf) cpf.onsubmit = async e => {
+    e.preventDefault(); const f = e.target; $('#cperr').textContent = '';
+    try { const pin = readNewPin(f); await Store.auth.setPin({ current: f.cur.value.trim(), pin }); f.reset(); toast('PIN cambiado'); }
+    catch (er) { $('#cperr').textContent = er.message || 'No se pudo cambiar el PIN.'; }
+  };
 }
 
 /* ================= configuración ================= */
@@ -3236,9 +3364,11 @@ function viewConfig() {
       <button class="btn" type="submit">Guardar configuración</button>
     </form></section>
     ${Store.mode === 'db' ? '<section class="panel" id="tplbox" style="margin-top:14px"></section>' : ''}
+    ${Store.mode === 'db' ? '<section class="panel" id="usobox" style="margin-top:14px"><p class="hint">Cargando uso de la base…</p></section>' : ''}
     <section class="panel" id="hol" style="margin-top:14px"></section>
     <section class="panel" id="bkp" style="margin-top:14px"><p class="hint">Cargando copias…</p></section>`;
   AV.tplDraft = null; renderTplBox();
+  renderUso();
   renderHolidays();
   renderBackups();
   $('#cf').onsubmit = async e => {
@@ -3256,6 +3386,36 @@ function viewConfig() {
     try { await Store.setCfg(Object.assign({}, S.cfg, { days, open, close, cap, medMin, sobre, maxRec, roles, catPrices, endReminder })); toast('Configuración guardada'); S.sig = ''; setTimeout(() => { render(); renderView(true); }, 50); }
     catch (er) { err.textContent = 'No se pudo guardar. Revisá tu permiso de edición.'; }
   };
+}
+
+/* ================= uso de Neon frente a los límites del plan ================= */
+// Neon no manda avisos en el plan gratuito: esta tarjeta (y un aviso al entrar) muestran cuánto falta para el límite.
+// Vercel sí manda mails en el plan Hobby al acercarse a sus límites (ver README, "Límites de Vercel y Neon").
+const USO_WARN = 0.8;
+async function fetchUso() { try { S.uso = await window.NeonDB.api('GET', '/api/uso'); } catch (e) { S.uso = null; } return S.uso; }
+function usoRows(u) {
+  const L = u.limits || {}, rows = [['Espacio de la base', u.storageMb, L.storageMb, 'MB']];
+  if (u.cuHours != null) rows.push(['Horas de cómputo este mes', u.cuHours, L.cuHours, 'CU-h']);
+  if (u.transferGb != null) rows.push(['Transferencia este mes', u.transferGb, L.transferGb, 'GB']);
+  return rows.map(([label, v, max, unit]) => ({ label, v, max, unit, pct: max ? v / max : 0 }));
+}
+async function renderUso() {
+  const box = $('#usobox'); if (!box) return;
+  const u = await fetchUso(); if (!$('#usobox')) return;
+  if (!u) { box.innerHTML = '<h2>Uso de la base</h2><p class="hint">No se pudo leer el uso.</p>'; return; }
+  box.innerHTML = `<h2>Uso de la base (Neon)</h2>
+    <p class="hint">Límites del plan gratuito. Si se pasa el espacio, la agenda deja de guardar; si se terminan las horas de cómputo, la base se apaga hasta el mes siguiente.</p>
+    ${usoRows(u).map(r => `<div class="fld"><span>${esc(r.label)}: ${numFmt(r.v)} de ${numFmt(r.max)} ${r.unit} (${Math.round(r.pct * 100)}%)</span>
+      <div style="height:10px;border-radius:99px;background:var(--soft);overflow:hidden"><div style="height:100%;width:${Math.min(100, Math.round(r.pct * 100))}%;background:${r.pct >= USO_WARN ? 'var(--danger, #c0392b)' : 'var(--brand)'}"></div></div></div>`).join('')}
+    ${u.cuHours == null ? `<p class="hint">${esc(u.apiError || 'Para ver también las horas de cómputo y la transferencia del mes, cargá NEON_API_KEY y NEON_PROJECT_ID en Vercel.')}</p>` : ''}`;
+}
+// Al entrar, a administración: aviso si algo pasó el 80%.
+async function usoAlert() {
+  if (Store.mode !== 'db' || !isSec() || usoAlert.done) return;
+  usoAlert.done = true;
+  const u = await fetchUso(); if (!u) return;
+  const hot = usoRows(u).filter(r => r.pct >= USO_WARN);
+  if (hot.length) toast(`Atención: ${hot.map(r => `${r.label.toLowerCase()} al ${Math.round(r.pct * 100)}%`).join(' y ')} del límite de Neon. Mirá Ajustes.`);
 }
 
 /* ================= avisos entre secretaría y profesionales (push) ================= */

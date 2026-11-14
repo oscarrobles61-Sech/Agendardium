@@ -364,3 +364,27 @@ model notification_recipients {
   @@id([notification_id, user_id])
   @@index([user_id, read_at], map: "notification_recipients_user_idx")
 }
+
+model user_pins {
+  user_id  String   @id
+  pin_hash String
+  temp     Boolean  @default(false)
+  ver      BigInt
+  set_by   String?
+  set_at   DateTime @default(now()) @db.Timestamptz(3)
+}
+
+model login_attempts {
+  key          String    @id
+  fails        Int       @default(0)
+  locked_until DateTime? @db.Timestamptz(3)
+  updated_at   DateTime  @default(now()) @db.Timestamptz(3)
+}
+
+model doc_revs {
+  col String
+  id  String
+  rev BigInt
+
+  @@id([col, id])
+}
