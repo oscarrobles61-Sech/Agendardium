@@ -1255,6 +1255,9 @@ function slotData() {
 }
 
 // Primera sesión (amarillo) y última sesión del tratamiento (verde). Una continuación no vuelve a marcar la primera.
+// Sesión que cuenta como realizada en el Registro: asistió, o faltó y se recuperó en otra fecha
+// (la falta recuperada cuenta igual que la sesión de recupero; así 8 sesiones + 2 recuperos = 10).
+const doneSt = p => p.status === 'asist' || p.status === 'rec-done';
 const liveSt = p => { const st = p.status || 'prog'; return st !== 'falto' && st !== 'rec-done' && st !== 'cancel'; };
 const isFirstSes = p => p.n === 1 && liveSt(p) && !(planOf(p) || {}).cont;
 // Última sesión: la que llega al total del tratamiento, se haya recuperado o no (si se recuperó, la marcada es el recupero).
@@ -2119,8 +2122,8 @@ function renderPatientList() {
     Object.values(PD.byDate).forEach(list => list.forEach(p => {
       const key = entryKey(p);
       const o = map[key] = map[key] || { key, pid: p.pid || '', name: pname(p), prog: 0, real: 0, falt: 0, pend: 0, tids: {} };
-      if (p.status !== 'rec-done' && p.status !== 'cancel') o.prog++;
-      if (p.status === 'asist') o.real++; else if (p.status === 'falto') o.falt++; else if ((p.status || 'prog') === 'prog') o.pend++;
+      if (p.status !== 'cancel') o.prog++;
+      if (doneSt(p)) o.real++; else if (p.status === 'falto') o.falt++; else if ((p.status || 'prog') === 'prog') o.pend++;
       if (p.tid) o.tids[p.tid] = 1;
     }));
     rows = Object.values(map).map(o => {
@@ -2536,7 +2539,7 @@ function patDetailHTML(o) {
     const st = p.status || 'prog'; const ex = []; let cls, txt;
     if (st === 'asist') { cls = 'ok'; txt = '✓ Asistió'; }
     else if (st === 'falto') { cls = 'no'; txt = '✗ Faltó'; }
-    else if (st === 'rec-done') { cls = 'rec'; txt = '↻ Faltó y se recuperó' + (p.recTo ? ' el ' + labelDate(p.recTo.split('_')[0]) : ''); }
+    else if (st === 'rec-done') { cls = 'rec'; txt = '↻ Faltó y se recuperó' + (p.recTo ? ' el ' + labelDate(p.recTo.split('_')[0]) : ''); ex.push('cuenta como realizada'); }
     else if (st === 'cancel') { cls = 'no'; txt = '⊘ Cancelada'; if (p.cancelReason) ex.push(p.cancelReason); }
     else { cls = 'pend'; txt = p.rec ? '○ Recupero pendiente' : '○ Pendiente'; }
     if (p.rec && st !== 'prog') ex.push('Es un recupero');
@@ -2558,14 +2561,14 @@ function monthCompute() {
   const row = p => { const key = entryKey(p); return map[key] = map[key] || { key, pid: p.pid || '', name: pname(p), cat: catOf(p), prog: 0, real: 0, falt: 0, pend: 0, recs: 0, bReal: 0, carry: 0, carryMonths: {}, defer: '' }; };
   Object.values(byDate).forEach(list => list.forEach(p => {
     const o = row(p);
-    if (p.status !== 'rec-done' && p.status !== 'cancel') o.prog++;
+    if (p.status !== 'cancel') o.prog++;
     if (p.rec) o.recs++;
-    if (p.status === 'asist') o.real++; else if (p.status === 'falto') o.falt++; else if ((p.status || 'prog') === 'prog') o.pend++;
+    if (doneSt(p)) o.real++; else if (p.status === 'falto') o.falt++; else if ((p.status || 'prog') === 'prog') o.pend++;
     const eff = effBillMonth(p, ym);
-    if (eff === ym) { if (p.status === 'asist') o.bReal++; } else if (eff > o.defer) o.defer = eff;
+    if (eff === ym) { if (doneSt(p)) o.bReal++; } else if (eff > o.defer) o.defer = eff;
   }));
   Object.entries(prevByDate).forEach(([date, list]) => list.forEach(p => {
-    if (p.status !== 'asist') return;
+    if (!doneSt(p)) return;
     const eY = ymOf(date); if (effBillMonth(p, eY) !== ym) return;
     const o = row(p); o.bReal++; o.carry++; o.carryMonths[eY] = (o.carryMonths[eY] || 0) + 1;
   }));
@@ -2611,12 +2614,12 @@ function drawMonth() {
   for (let day = 1; day <= ndays; day++) {
     const date = prefix + pad(day); const dow = parse(date).getDay();
     const list = (byDate[date] || []).slice().sort((a, b) => a._k.localeCompare(b._k, undefined, { numeric: true }));
-    const prog = list.filter(p => p.status !== 'rec-done' && p.status !== 'cancel').length;
-    const real = list.filter(p => p.status === 'asist').length;
+    const prog = list.filter(p => p.status !== 'cancel').length;
+    const real = list.filter(doneSt).length;
     const falt = list.filter(p => p.status === 'falto').length;
     const pend = list.filter(p => (p.status || 'prog') === 'prog').length;
     const rec = list.filter(p => p.rec).length;
-    let fact = 0; list.forEach(p => { if (p.status === 'asist' && effBillMonth(p, ym) === ym) fact += priceFor(bill, catOf(p)); });
+    let fact = 0; list.forEach(p => { if (doneSt(p) && effBillMonth(p, ym) === ym) fact += priceFor(bill, catOf(p)); });
     acum += real; T.prog += prog; T.real += real; T.falt += falt; T.pend += pend; T.rec += rec;
     const off = (!S.cfg.days.includes(dow) || isClosed(date)) && !list.length; const hol = holidayOf(date);
     rows += `<tr class="${off ? 'off' : ''} ${date === todayS ? 'today' : ''}" data-date="${date}"><td><b>${day}</b> <small>${DAYS_S[dow]}</small>${hol ? `<small class="hl2">${esc(hol.name)}</small>` : ''}</td><td>${prog || '·'}</td><td>${real || '·'}</td><td>${falt || '·'}</td><td>${rec || '·'}</td><td><b>${acum}</b></td>${showF ? `<td>${fact ? money(fact) : '·'}</td>` : ''}</tr>`;
@@ -2647,7 +2650,7 @@ function drawMonth() {
     <section class="panel" style="margin-top:14px"><h2 style="font-size:19px;margin-bottom:8px">Registro diario</h2>
       <div class="gridbox"><table class="mt dtab"><thead><tr><th>Día</th><th>Prog.</th><th>Realiz.</th><th>Faltas</th><th>Recup.</th><th>Acum.</th>${showF ? '<th>Facturado</th>' : ''}</tr></thead>
         <tbody>${rows}<tr class="tot"><td>Total del mes</td><td>${T.prog}</td><td>${T.real}</td><td>${T.falt}</td><td>${T.rec}</td><td>${T.real}</td>${showF ? `<td>${money(C.tot.billed)}</td>` : ''}</tr></tbody></table></div>
-      <p class="summary">Prog. = sesiones programadas (sin contar las ya recuperadas). Realiz. = con asistencia marcada. Tocá un día para abrirlo en la agenda.</p></section>`;
+      <p class="summary">Prog. = sesiones programadas. Realiz. = con asistencia marcada, más las faltas que se recuperaron en otra fecha (cuentan igual que la sesión de recupero). Tocá un día para abrirlo en la agenda.</p></section>`;
 
   const updateLive = skip => {
     const L = monthCompute();
