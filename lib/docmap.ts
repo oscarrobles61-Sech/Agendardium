@@ -97,7 +97,8 @@ const USER: Field[] = [
 ];
 const SCHEDULE: Field[] = [
   ['on', 'works', 'bool'], ['from', 'from_hour', 'int'], ['to', 'to_hour', 'int'],
-  ['from2', 'from_hour2', 'int'], ['to2', 'to_hour2', 'int'] // 2ª franja del día (opcional)
+  ['from2', 'from_hour2', 'int'], ['to2', 'to_hour2', 'int'], // 2ª franja del día (opcional)
+  ['types', 'session_types', { arrayOf: SESSION_TYPES }], ['types2', 'session_types2', { arrayOf: SESSION_TYPES }] // tipos que admite cada franja (vacío = todos)
 ];
 const PATIENT: Field[] = [
   ['name', 'name', 'text'], ['dni', 'dni', 'text'], ['phone', 'phone', 'text'], ['insurance', 'insurance', 'text'],
@@ -369,7 +370,7 @@ export const COLUMNS: Record<string, string[]> = {
   app_config: ['id', 'center_name', 'open_hour', 'close_hour', 'capacity_per_hour', 'work_days', 'med_minutes', 'max_overbooks', 'max_recoveries', 'end_reminder_sessions', 'kine_roles', 'category_prices', 'holidays_auto', 'nolab_closes_center', 'extra'],
   holidays: ['date', 'month_day', 'name', 'type', 'closed', 'removed', 'yearly', 'from_year', 'extra'],
   users: ['id', 'name', 'dni', 'title', 'role', 'profiles', 'kine_roles', 'photo', 'active', 'extra'],
-  user_schedules: ['user_id', 'weekday', 'works', 'from_hour', 'to_hour', 'from_hour2', 'to_hour2', 'extra'],
+  user_schedules: ['user_id', 'weekday', 'works', 'from_hour', 'to_hour', 'from_hour2', 'to_hour2', 'session_types', 'session_types2', 'extra'],
   patients: ['id', 'name', 'dni', 'phone', 'insurance', 'affiliate_no', 'pay_category', 'notes', 'created_at', 'updated_at', 'extra'],
   patient_professionals: ['patient_id', 'user_id', 'pos'],
   treatment_plans: ['id', 'patient_id', 'professional_id', 'total_sessions', 'placed_sessions', 'recoveries_used', 'diagnosis', 'start_date', 'last_date', 'status', 'bill_month', 'end_note', 'ended_at', 'created_at', 'session_type', 'training_frequency', 'practice', 'specialty', 'until_date', 'pos', 'extra'],

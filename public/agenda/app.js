@@ -464,7 +464,7 @@ async function nextPlanDate(proId, pl, from, days, hourOf) {
     if (!first) first = date;
     if (++i > 120) break;
     const hr = hourOf(d);
-    if (pro && !works(pro, d, hr.h)) continue;
+    if (pro && !works(pro, d, hr.h, pl && pl.type)) continue;
     const w = mondayKey(date);
     if (w !== wk) { wk = w; try { doc = await Store.getAgenda(w + '_' + proId); } catch (e) { doc = null; } }
     if (blockAt(doc, date, hr.h)) continue;
@@ -504,11 +504,24 @@ function conflictToast(msg) {
 // Cupo de una hora: el del centro, salvo que el profesional lo haya bajado para esa hora (1 a cupo del centro).
 // 0 = horario cerrado: no se aceptan ingresos en esa hora.
 const capAt = (pro, h) => { const v = pro && pro.hourCap ? pro.hourCap[h] : undefined; if (v === 0) return 0; const c = +v; return c >= 1 ? Math.min(c, S.cfg.cap) : S.cfg.cap; };
-function works(pro, d, h) {
+// Franja de un día que contiene esa hora: { from, types } (types vacío = admite todos los tipos de sesión), o null.
+// Hasta dos franjas por día (ej. 8 a 12 y 17 a 20): las horas del medio quedan cerradas.
+function franjaAt(pro, d, h) {
   const sc = pro && pro.schedule && pro.schedule[d];
-  // Hasta dos franjas por día (ej. 8 a 12 y 17 a 20): las horas del medio quedan cerradas.
-  return !!(sc && sc.on && ((h >= sc.from && h < sc.to) || (sc.from2 != null && sc.to2 != null && h >= sc.from2 && h < sc.to2)));
+  if (!sc || !sc.on) return null;
+  if (h >= sc.from && h < sc.to) return { from: sc.from, types: sc.types || [] };
+  if (sc.from2 != null && sc.to2 != null && h >= sc.from2 && h < sc.to2) return { from: sc.from2, types: sc.types2 || [] };
+  return null;
 }
+const franjaOk = (fr, type) => !!fr && (!type || !fr.types.length || (Array.isArray(type) ? type.some(t => fr.types.includes(t)) : fr.types.includes(type)));
+// Sin 'type': si atiende a esa hora. Con 'type' (uno o una lista): si además esa franja admite ese tipo de sesión.
+function works(pro, d, h, type) { return franjaOk(franjaAt(pro, d, h), type); }
+const typesText = ts => ts.map(t => SESSION_TYPES[t] || t).join(', ');
+// Tipos de sesión de una especialidad (las propias del centro cuentan como rehabilitación).
+const specTypes = sp => { const t = Object.keys(SPECS_BY_TYPE).filter(k => SPECS_BY_TYPE[k].includes(sp)); return t.length ? t : ['rehabilitacion']; };
+// Tipos que busca la secretaría con el filtro de rol (null = sin filtro de tipo).
+const filterTypes = () => (isSec() && S.roleFilter && S.roleFilter !== '*' && !S.roleFilter.startsWith('__')) ? specTypes(S.roleFilter) : null;
+const admitsSomewhere = (pro, types) => !types || S.cfg.days.some(d => { const sc = pro.schedule && pro.schedule[d]; return sc && sc.on && [sc.types || [], ...(sc.from2 != null ? [sc.types2 || []] : [])].some(ts => franjaOk({ types: ts }, types)); });
 
 function pipsHTML(n, cap, big) {
   const cols = Math.min(Math.ceil(cap / 2), 10);
@@ -923,7 +936,7 @@ function freeAt(id, h) {
   const mon = parse(S.week); let free = 0, used = 0, works1 = false;
   S.cfg.days.forEach(d => {
     const date = fmt(addDays(mon, ORDER.indexOf(d)));
-    if (!works(pro, d, h) || isClosed(date) || blockAt(doc, date, h) || !capAt(pro, h)) return; works1 = true;
+    if (!works(pro, d, h, filterTypes()) || isClosed(date) || blockAt(doc, date, h) || !capAt(pro, h)) return; works1 = true;
     if (med) { for (let m = 0; m < 60; m += S.cfg.medMin) { const occ = (slots[slotKey(date, h, m)] || []).filter(p => occupies(p) && !p.sob).length; used += occ; free += occ ? 0 : 1; } }
     else { const occ = (slots[slotKey(date, h, null)] || []).filter(occupies).length; used += occ; free += Math.max(0, capAt(pro, h) - occ); }
   });
@@ -949,7 +962,7 @@ function bindSuggest(input, box, items, pick) {
 function viewAgenda() {
   const sec = isSec();
   const allPros = Object.entries(S.users).filter(([, u]) => isPro(u));
-  let pros = allPros.filter(([, u]) => S.roleFilter === '*' || (S.roleFilter === '__med' ? isMed(u) : S.roleFilter.startsWith('__r:') ? hasRole(u, S.roleFilter.slice(4)) : proSpecs(u).includes(S.roleFilter))).sort(byName);
+  let pros = allPros.filter(([, u]) => S.roleFilter === '*' || (S.roleFilter === '__med' ? isMed(u) : S.roleFilter.startsWith('__r:') ? hasRole(u, S.roleFilter.slice(4)) : proSpecs(u).includes(S.roleFilter) && admitsSomewhere(u, filterTypes()))).sort(byName);
   // Con hora elegida: solo quienes atienden a esa hora, primero el que tiene menos pacientes (más lugar libre).
   const hf = sec && S.hourFilter != null ? S.hourFilter : null; const fr = {};
   if (hf != null) {
@@ -975,7 +988,8 @@ function viewAgenda() {
         <label class="lbl rolefilter">Hora
         <span class="fsugw"><input type="text" id="hf" class="sel-pro" autocomplete="off" inputmode="numeric" placeholder="Ej. 17" value="${hf != null ? hf + ' h' : ''}" style="max-width:90px"><div id="hfsug" class="sug fsug" hidden></div></span></label>
         ${pros.length ? `<label class="lbl rolefilter">Agenda de
-        <select id="pro" class="sel-pro">${pros.map(([id, u]) => `<option value="${id}"${id === S.proId ? ' selected' : ''}>${esc(u.name)}${isMed(u) ? ' (médico/a)' : ''}${hf != null ? ` · ${fr[id].used} ${fr[id].used === 1 ? 'paciente' : 'pacientes'}, ${fr[id].free} libres` : ''}</option>`).join('')}</select></label>` : (hf != null ? `<span class="hint">Nadie de ese rol atiende a las ${hf} h esta semana.</span>` : '')}</div>` : ''}
+        <select id="pro" class="sel-pro">${pros.map(([id, u]) => `<option value="${id}"${id === S.proId ? ' selected' : ''}>${esc(u.name)}${isMed(u) ? ' (médico/a)' : ''}${hf != null ? ` · ${fr[id].used} ${fr[id].used === 1 ? 'paciente' : 'pacientes'}, ${fr[id].free} libres` : ''}</option>`).join('')}</select></label>` : (hf != null ? `<span class="hint">Nadie de ese rol atiende a las ${hf} h esta semana.</span>` : '')}
+        <button type="button" class="btn ghost small" id="clrf"${S.roleFilter === '*' && hf == null ? ' disabled' : ''}>Limpiar filtros</button></div>` : ''}
     <p class="rothint">Tip: girá el celular en horizontal para ver toda la semana, como en la planilla.</p>
     <div id="rbar"></div>
     <div id="cxbar"></div>
@@ -1000,6 +1014,7 @@ function viewAgenda() {
   $('#fw').onclick = () => { S.fullWeek = !S.fullWeek; $('#fw').textContent = S.fullWeek ? 'Un día' : 'Semana completa'; renderGrid(); };
   $('#today').onclick = () => { S.week = fmt(mondayOf(nowBA())); S.mobDay = null; viewAgenda(); };
   const sp = $('#pro'); if (sp) sp.onchange = () => { S.proId = sp.value; renderGrid(); };
+  const clr = $('#clrf'); if (clr) clr.onclick = () => { S.roleFilter = '*'; S.hourFilter = null; viewAgenda(); };
   const rf = $('#rf');
   if (rf) {
     bindSuggest(rf, $('#rfsug'), roleOptions, k => { S.roleFilter = k; S.proId = null; viewAgenda(); });
@@ -1092,6 +1107,7 @@ function renderGrid() {
   if (!days.length) { g.innerHTML = `<div class="empty"><h2>No hay días de atención</h2><p>Elegí los días en Configuración.</p></div>`; md.innerHTML = ''; return; }
   if (S.mobDay == null || !days.includes(S.mobDay)) { const t = nowBA().getDay(); S.mobDay = days.includes(t) ? t : days[0]; }
   const doc = S.agenda[S.week + '_' + S.proId]; const slots = (doc && doc.slots) || {};
+  const ftypes = isMed(pro) ? null : filterTypes();
   renderCxBar(doc);
   const med = isMed(pro); const cap = S.cfg.cap; const mon = parse(S.week); const todayS = fmt(nowBA());
   const dateOf = d => fmt(addDays(mon, ORDER.indexOf(d)));
@@ -1157,12 +1173,14 @@ function renderGrid() {
       const m = med ? r * step : null;
       days.forEach(d => {
         const date = dateOf(d); const arr = slots[slotKey(date, h, m)] || [];
-        const open = works(pro, d, h) && !isClosed(date) && !blockAt(doc, date, h);
+        const open = works(pro, d, h, ftypes) && !isClosed(date) && !blockAt(doc, date, h);
         const base = `ln${r === 0 ? ' b0' : ''}${hid(d)}${med ? ' med' : ''}`;
         const data = `data-date="${date}" data-h="${h}" data-d="${d}"${med ? ` data-m="${m}"` : ''}`;
         if (!open && !arr.length) {
-          const bk = blockAt(doc, date, h); const lab = (r === 0 && (bk || (isClosed(date) && h === hours[0]))) ? (bk ? 'Cancelada: ' + (bk.reason || '') : holidayOf(date).name) : '';
-          html += `<div class="${base} off">${lab ? `<span class="cxl">${esc(lab)}</span>` : ''}</div>`; return;
+          const bk = blockAt(doc, date, h); let lab = (r === 0 && (bk || (isClosed(date) && h === hours[0]))) ? (bk ? 'Cancelada: ' + (bk.reason || '') : holidayOf(date).name) : '';
+          const fx = ftypes && !bk && !isClosed(date) ? franjaAt(pro, d, h) : null; const nofr = !!fx && !franjaOk(fx, ftypes);
+          if (nofr && r === 0 && h === fx.from) lab = 'Solo ' + typesText(fx.types);
+          html += `<div class="${base} off${nofr ? ' nofr' : ''}"${nofr ? ` title="Esta franja no admite ${esc(typesText(ftypes))}"` : ''}>${lab ? `<span class="cxl">${esc(lab)}</span>` : ''}</div>`; return;
         }
         if (med) {
           const reg = arr.find(p => !p.sob && occupies(p)) || arr.find(p => !p.sob);
@@ -1435,11 +1453,20 @@ function openSlot(date, h, d, m, eid) {
   const hourOf = x => M.hours[x] || { h, m: med ? m : null };
   const fmtH = x => { const o = hourOf(x); return med ? tm(o.h, o.m) : hh(o.h); };
   const renderDays = checked => {
-    $('#dchips').innerHTML = days.map(x => { const o = hourOf(x); const ok = works(pro, x, o.h); const diff = o.h !== h || (med && o.m !== m);
+    $('#dchips').innerHTML = days.map(x => { const o = hourOf(x); const ok = works(pro, x, o.h, typeNow()); const diff = o.h !== h || (med && o.m !== m);
       return `<label class="chip"><input type="checkbox" name="d" value="${x}" ${checked.includes(x) && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}><span>${DAYS_S[x]}${diff ? `<small>${fmtH(x)}</small>` : ''}</span></label>`; }).join('');
   };
   const chosenDays = () => [...af.querySelectorAll('input[name=d]:checked')].map(x => +x.value);
   const fromDate = () => (/^\d{4}-\d{2}-\d{2}$/.test(f.from.value) ? f.from.value : M.date);
+  // Tipo de sesión vigente: el del tratamiento que se continúa o el elegido para uno nuevo.
+  const typeNow = () => { const pl = M.tid && M.pid && S.patients[M.pid] && S.patients[M.pid].plans[M.tid]; return pl ? (pl.type || null) : (f.stype && f.stype.value ? f.stype.value.split('|')[0] : null); };
+  // Tipo propuesto: el que busca la secretaría (si esta franja lo admite) o, si el primero no entra, el primero que sí.
+  if (f.stype) {
+    const opts = [...f.stype.options]; const okOpt = o => works(pro, d, h, o.value.split('|')[0]);
+    const want = isSec() && S.roleFilter && !S.roleFilter.startsWith('__') ? S.roleFilter : null;
+    const best = opts.find(o => okOpt(o) && want && o.value.split('|')[1] === want) || (f.stype.selectedOptions[0] && okOpt(f.stype.selectedOptions[0]) ? null : opts.find(okOpt));
+    if (best) f.stype.value = best.value;
+  }
   renderDays([d]);
   // Abre el calendario desplegable al tocar el campo (en celulares ya lo abre solo).
   f.from.addEventListener('click', () => { try { f.from.showPicker && f.from.showPicker(); } catch (er) {} });
@@ -1492,6 +1519,7 @@ function openSlot(date, h, d, m, eid) {
     const box = $('#typeBox'), fixed = $('#typeFixed');
     box.hidden = !!pl; fixed.hidden = !pl;
     if (pl) fixed.textContent = 'Tipo de sesión: ' + (planTypeText(pl) || 'sin indicar');
+    { const keep = chosenDays(); renderDays(keep.length ? keep : [d]); }
     const { type } = chosenType();
     box.querySelectorAll('[data-for]').forEach(x => { x.hidden = x.dataset.for !== type; });
     // Entrenamiento: la cantidad sale de la frecuencia y del mes; práctica diferenciada: sin tope.
@@ -1582,7 +1610,7 @@ function openSlot(date, h, d, m, eid) {
     if (!canEditAgenda(M.proId)) return toast('No tenés permiso sobre esta agenda.');
     const name = f.name.value.trim(); if (!name) return;
     const chosen = chosenDays();
-    if (!chosen.length) return toast('Elegí al menos un día.');
+    if (!chosen.length) { const ty = typeNow(); return toast(ty && works(pro, d, M.h) && !works(pro, d, M.h, ty) ? `La franja de las ${M.h} h de ${pro.name} no admite ${SESSION_TYPES[ty] || ty}. Elegí otro tipo de sesión u otro horario.` : 'Elegí al menos un día.'); }
     const startDate = f.from.value; if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return toast('Elegí la fecha de inicio en el calendario.');
     const hours = Object.fromEntries(chosen.map(x => [x, hourOf(x)]));
     const { type, spec } = chosenType();
@@ -1710,7 +1738,7 @@ async function addSessions(o) {
     const hr = hourOf(d); const key = slotKey(date, hr.h, med ? hr.m : null); const arr = curDoc.slots[key] || [];
     const occ = arr.filter(occupies); const reg = occ.filter(p => !p.sob).length, sobN = occ.length - reg;
     const fits = med ? (o.sob ? sobN < S.cfg.sobre : reg < 1) : occ.length < capAt(pro, hr.h);
-    if (!works(pro, d, hr.h) || isClosed(date) || blockAt(curDoc, date, hr.h) || !fits) { skipped++; continue; }
+    if (!works(pro, d, hr.h, pl.type) || isClosed(date) || blockAt(curDoc, date, hr.h) || !fits) { skipped++; continue; }
     n++;
     const entry = { id: uid(), name: o.name, phone: o.phone, note: o.note, pid, tid, n, series: tid, status: 'prog', by: S.me };
     if (med && o.sob) entry.sob = true;
@@ -1757,7 +1785,7 @@ async function seriesModal(kind, ent, ctx) {
       <div class="fld"><span>Desde <small>(tocá para abrir el calendario)</small></span>
         <div class="dpick"><input type="date" name="from" value="${start}" required></div></div>
       <div class="fld"><span>Días de la semana ${patDays.length ? '<small>(los del tratamiento; podés cambiarlos)</small>' : ''}</span>
-        <div class="chips">${days.map(x => { const ok = works(pro, x, hourOf(x).h); return `<label class="chip"><input type="checkbox" name="d" value="${x}" ${pre.includes(x) && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}><span>${DAYS_S[x]}${sameH ? '' : `<small>${fmtH(x)}</small>`}</span></label>`; }).join('')}</div>
+        <div class="chips">${days.map(x => { const ok = works(pro, x, hourOf(x).h, pl.type); return `<label class="chip"><input type="checkbox" name="d" value="${x}" ${pre.includes(x) && ok ? 'checked' : ''} ${ok ? '' : 'disabled'}><span>${DAYS_S[x]}${sameH ? '' : `<small>${fmtH(x)}</small>`}</span></label>`; }).join('')}</div>
         <small id="sprev"></small></div>
       <button class="btn" type="submit">${title}</button>
     </form>`);
@@ -2654,7 +2682,7 @@ function drawMonth() {
 }
 
 /* ================= copias de seguridad ================= */
-const BK_EVERY = 12 * 3600 * 1000, BK_KEEP = 14, BK_TAB = uid();
+const BK_EVERY = 12 * 3600 * 1000, BK_KEEP = 14, BK_LEAVE = 3, BK_TAB = uid(); // BK_LEAVE: las que quedan al tocar "Borrar las viejas"
 let bkBusy = false, bkTimer = null, DLC;
 function b64FromBuf(buf) { const b = new Uint8Array(buf); let s = ''; for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000)); return btoa(s); }
 async function packJSON(str) {
@@ -2717,10 +2745,10 @@ async function renderBackups() {
   const last = list[0]; const kindTxt = { auto: 'Automática', manual: 'Manual', 'pre-restore': 'Antes de restaurar' };
   box.innerHTML = `<h2 style="font-size:19px;margin-bottom:4px">Copias de seguridad</h2>
     <p class="hint">${last ? `Última copia: <b>${esc(whenTxt(last.at))}</b> (${esc(kindTxt[last.kind] || '')}).` : 'Todavía no hay copias.'} La agenda hace una copia sola cada 12 horas mientras alguien la esté usando y guarda las últimas ${BK_KEEP}. ${Store.mode === 'local' ? 'En modo local las copias quedan solo en este navegador.' : ''}</p>
-    <div class="actions" style="margin:0 0 8px"><button class="btn" id="bk-now" type="button">Hacer copia ahora</button><button class="btn ghost" id="bk-dl" type="button">Descargar copia actual</button><button class="btn ghost" id="bk-file" type="button">Restaurar desde archivo</button></div>
+    <div class="actions" style="margin:0 0 8px"><button class="btn" id="bk-now" type="button">Hacer copia ahora</button><button class="btn ghost" id="bk-dl" type="button">Descargar copia actual</button><button class="btn ghost" id="bk-file" type="button">Restaurar desde archivo</button>${list.length > BK_LEAVE ? `<button class="btn danger" id="bk-old" type="button">Borrar las viejas (quedan las ${BK_LEAVE} últimas)</button>` : ''}</div>
     <p class="hint" style="margin-bottom:6px">Tip: descargá una copia cada tanto y guardala en tu Drive o tu computadora, por si algún día se pierde la base de datos completa.</p>
     ${list.map(m => `<div class="person"><div><h3 style="font-size:15px">${esc(whenTxt(m.at))}</h3><p>${esc(kindTxt[m.kind] || '')} · ${m.counts.patients} pacientes, ${m.counts.users} perfiles, ${m.counts.agenda} semanas de agenda</p></div>
-      <div class="rowbtns"><button class="btn ghost small" data-bkdl="${esc(m.id)}">Descargar</button><button class="btn ghost small" data-bkrs="${esc(m.id)}">Restaurar</button></div></div>`).join('')}`;
+      <div class="rowbtns"><button class="btn ghost small" data-bkdl="${esc(m.id)}">Descargar</button><button class="btn ghost small" data-bkrs="${esc(m.id)}">Restaurar</button><button class="btn ghost small" data-bkrm="${esc(m.id)}">Borrar</button></div></div>`).join('')}`;
   const byId = id => list.find(m => m.id === id);
   $('#bk-now').onclick = async e => { e.target.disabled = true; try { await runBackup('manual'); toast('Copia guardada'); await renderBackups(); } catch (er) { toast('No se pudo guardar la copia.'); e.target.disabled = false; } };
   $('#bk-dl').onclick = async () => { try { const d = await Store.dump(); await saveFile(`copia-finochietto-${stamp()}.json`, JSON.stringify(d)); } catch (er) { toast('No se pudo preparar la copia.'); } };
@@ -2729,7 +2757,22 @@ async function renderBackups() {
     inp.onchange = async () => { const f = inp.files && inp.files[0]; if (!f) return; try { await restoreData(JSON.parse(await f.text()), 'del archivo'); } catch (er) { toast('No se pudo leer ese archivo.'); } };
     inp.click();
   };
+  const bo = $('#bk-old');
+  if (bo) bo.onclick = async () => {
+    const old = list.slice(BK_LEAVE);
+    if (!(await confirmBox(`Se borran ${old.length} copias de seguridad, desde la del ${whenTxt(old[0].at)} hacia atrás. Quedan las ${BK_LEAVE} más recientes. Las copias borradas no se pueden recuperar.`, 'Borrar copias', 'Cancelar', 'Borrar copias viejas'))) return;
+    bo.disabled = true; let n = 0;
+    for (const m of old) { try { await Store.bkDel(m); n++; } catch (er) {} }
+    toast(n === old.length ? `${n} copias borradas` : `Se borraron ${n} de ${old.length} copias. Probá de nuevo.`); await renderBackups();
+  };
   box.onclick = async e => {
+    const rm = e.target.closest('[data-bkrm]');
+    if (rm) {
+      const m = byId(rm.dataset.bkrm); if (!m) return;
+      if (!(await confirmBox(`Se borra la copia del ${whenTxt(m.at)}. No se puede recuperar.`, 'Borrar copia', 'Cancelar', 'Borrar copia de seguridad'))) return;
+      try { await Store.bkDel(m); toast('Copia borrada'); } catch (er) { toast('No se pudo borrar la copia.'); }
+      return renderBackups();
+    }
     const dl = e.target.closest('[data-bkdl]'), rs = e.target.closest('[data-bkrs]');
     const m = byId((dl || rs || {}).dataset && (dl || rs).dataset[dl ? 'bkdl' : 'bkrs']); if (!m) return;
     try { const data = JSON.parse(await unpackJSON(await Store.bkGet(m))); if (dl) await saveFile(`copia-finochietto-${stamp(m.at)}.json`, JSON.stringify(data)); else await restoreData(data, 'del ' + whenTxt(m.at)); }
@@ -3249,14 +3292,23 @@ async function deleteSessions(proId, items, finalize) {
 function schedSummary(u) {
   if (!isPro(u)) return isAdminU(u) ? 'Accede a las agendas de todos los profesionales' : 'Publica noticias para el equipo';
   const parts = ORDER.filter(d => S.cfg.days.includes(d) && u.schedule && u.schedule[d] && u.schedule[d].on)
-    .map(d => { const x = u.schedule[d]; return `${DAYS_S[d]} ${x.from}–${x.to}${x.from2 != null ? ' y ' + x.from2 + '–' + x.to2 : ''} h`; });
+    .map(d => { const x = u.schedule[d]; const tt = ts => (ts && ts.length ? ` (${typesText(ts)})` : '');
+      return `${DAYS_S[d]} ${x.from}–${x.to} h${tt(x.types)}${x.from2 != null ? ' y ' + x.from2 + '–' + x.to2 + ' h' + tt(x.types2) : ''}`; });
   return parts.length ? parts.join(', ') : 'Sin horarios cargados';
 }
 
+// Tipos de sesión que admite una franja (n = 1 o 2). Ninguno marcado = admite todos.
+function ftypesHTML(n, sel, two) {
+  sel = sel || [];
+  return `<div class="ftypes" data-fr="${n}" ${n === 2 && !two ? 'hidden' : ''}><span class="a">${n === 2 ? 'La 2ª admite' : two ? 'La 1ª admite' : 'Admite'}</span>
+    ${Object.entries(SESSION_TYPES).map(([k, v]) => `<label class="chip"><input type="checkbox" class="ft" value="${k}" ${sel.includes(k) ? 'checked' : ''}><span>${esc(v)}</span></label>`).join('')}
+    <small class="ftall"${sel.length ? ' hidden' : ''}>(todos)</small></div>`;
+}
 function schedHTML(sched) {
   const days = ORDER.filter(d => S.cfg.days.includes(d));
   return `<div class="lbl" style="margin-bottom:2px">Horario de trabajo</div>
-    <p class="hint">Tildá los días que atiende y elegí desde y hasta qué hora. Si corta al mediodía, agregá una 2ª franja (por ejemplo 8 a 12 y 17 a 20). Solo en esas franjas se pueden cargar pacientes.</p>
+    <p class="hint">Tildá los días que atiende y elegí desde y hasta qué hora. Si corta al mediodía, agregá una 2ª franja (por ejemplo 8 a 12 y 17 a 20). Solo en esas franjas se pueden cargar pacientes.
+      En cada franja podés marcar qué tipos de sesión admite (por ejemplo, a la mañana solo Entrenamiento): la secretaría solo la ve disponible para esos tipos. Sin marcar ninguno, admite todos.</p>
     ${days.map(d => { const s = sched[d] || {}; const on = !!s.on; const two = s.from2 != null && s.to2 != null;
       const from = s.from != null ? s.from : S.cfg.open, to = s.to != null ? s.to : S.cfg.close;
       const from2 = two ? s.from2 : Math.min(Math.max(17, to), S.cfg.close - 1), to2 = two ? s.to2 : Math.min(Math.max(20, from2 + 1), S.cfg.close);
@@ -3266,10 +3318,12 @@ function schedHTML(sched) {
         <span class="a">a</span>
         <select name="to${d}" aria-label="Hasta ${DAYS[d]}" ${on ? '' : 'disabled'}>${hourOpts(S.cfg.open + 1, S.cfg.close, to)}</select>
         <button type="button" class="btn ghost small s2t" data-split>${two ? 'Quitar 2ª franja' : '+ 2ª franja'}</button>
+        ${ftypesHTML(1, s.types, two)}
         <div class="s2" ${two ? '' : 'hidden'}><span class="a">y de</span>
           <select name="fromB${d}" aria-label="Desde, 2ª franja, ${DAYS[d]}" ${on ? '' : 'disabled'}>${hourOpts(S.cfg.open, S.cfg.close - 1, from2)}</select>
           <span class="a">a</span>
-          <select name="toB${d}" aria-label="Hasta, 2ª franja, ${DAYS[d]}" ${on ? '' : 'disabled'}>${hourOpts(S.cfg.open + 1, S.cfg.close, to2)}</select></div></div>`; }).join('')}
+          <select name="toB${d}" aria-label="Hasta, 2ª franja, ${DAYS[d]}" ${on ? '' : 'disabled'}>${hourOpts(S.cfg.open + 1, S.cfg.close, to2)}</select></div>
+        ${ftypesHTML(2, s.types2, two)}</div>`; }).join('')}
     <div class="actions" style="margin-bottom:14px"><button type="button" class="btn ghost small" data-copyfirst>Copiar el primer día tildado a todos</button></div>`;
 }
 
@@ -3279,13 +3333,15 @@ function readSchedule(form) {
     const el = n => form.elements[n + d];
     const on = el('on').checked, from = +el('from').value, to = +el('to').value;
     if (on && to <= from) throw new Error(`${DAYS[d]}: la hora de fin debe ser posterior a la de inicio.`);
-    s[d] = { on, from, to };
+    const row = el('on').closest('.srow');
+    const typesOf = n => { const b = row && row.querySelector(`.ftypes[data-fr="${n}"]`); return b ? [...b.querySelectorAll('.ft:checked')].map(x => x.value) : []; };
+    s[d] = { on, from, to, types: typesOf(1) };
     const box = el('fromB') && el('fromB').closest('.s2');
     if (box && !box.hidden) {
       const from2 = +el('fromB').value, to2 = +el('toB').value;
       if (on && from2 < to) throw new Error(`${DAYS[d]}: la 2ª franja tiene que empezar después de que termine la 1ª (${to} h).`);
       if (on && to2 <= from2) throw new Error(`${DAYS[d]}: en la 2ª franja, la hora de fin debe ser posterior a la de inicio.`);
-      Object.assign(s[d], { from2, to2 });
+      Object.assign(s[d], { from2, to2, types2: typesOf(2) });
     }
   });
   return s;
@@ -3313,27 +3369,37 @@ function bindUserForm(id, isNew, opts) {
   const acts = f.querySelector('#uactions');
   let photoState = (u && u.photo) || '';
   acts.innerHTML = `<button class="btn" type="submit">Guardar</button>${opts.onCancel ? '<button class="btn ghost" type="button" data-cancel>Cancelar</button>' : ''}${opts.canDelete ? '<button class="btn danger" type="button" data-remove>Eliminar perfil</button>' : ''}`;
-  const syncRow = row => { const on = row.querySelector('input[type=checkbox]').checked; row.classList.toggle('off', !on); row.querySelectorAll('select').forEach(s => s.disabled = !on); };
+  const dayBox = r => r.querySelector(`input[name="on${r.dataset.d}"]`);
+  const syncRow = row => { const on = dayBox(row).checked; row.classList.toggle('off', !on); row.querySelectorAll('select, .ft').forEach(s => s.disabled = !on); };
+  const syncTypes = b => { b.querySelector('.ftall').hidden = !!b.querySelector('.ft:checked'); };
+  const syncSplit = (row, two) => {
+    row.querySelector('.s2').hidden = !two; row.querySelector('[data-split]').textContent = two ? 'Quitar 2ª franja' : '+ 2ª franja';
+    row.querySelector('.ftypes[data-fr="2"]').hidden = !two; row.querySelector('.ftypes[data-fr="1"] .a').textContent = two ? 'La 1ª admite' : 'Admite';
+  };
+  f.querySelectorAll('.srow').forEach(syncRow);
   f.addEventListener('change', e => {
+    if (e.target.classList.contains('ft')) { syncTypes(e.target.closest('.ftypes')); return; }
     if (e.target.name === 'pf') { const pf = formProfiles(); f.querySelector('#schedBox').hidden = !isPro({ profiles: pf }); f.querySelector('#rolesBox').hidden = !isPro({ profiles: pf }); }
     const row = e.target.closest('.srow'); if (row && e.target.type === 'checkbox') syncRow(row);
   });
   f.addEventListener('click', async e => {
     if (e.target.closest('[data-copyfirst]')) {
-      const rows = [...f.querySelectorAll('.srow')]; const src = rows.find(r => r.querySelector('input[type=checkbox]').checked);
+      const rows = [...f.querySelectorAll('.srow')]; const src = rows.find(r => dayBox(r).checked);
       if (!src) return toast('Tildá primero un día.');
       // Copia las franjas del primer día tildado a los demás días de esta misma persona.
       const sel = (r, n) => r.querySelector(`select[name="${n}${r.dataset.d}"]`);
       const vals = ['from', 'to', 'fromB', 'toB'].map(n => sel(src, n).value), two = !src.querySelector('.s2').hidden;
+      const tsel = n => [...src.querySelectorAll(`.ftypes[data-fr="${n}"] .ft:checked`)].map(x => x.value);
+      const t1 = tsel(1), t2 = tsel(2);
       rows.forEach(r => {
-        r.querySelector('input[type=checkbox]').checked = true;
+        dayBox(r).checked = true;
         ['from', 'to', 'fromB', 'toB'].forEach((n, i) => { sel(r, n).value = vals[i]; });
-        r.querySelector('.s2').hidden = !two; r.querySelector('[data-split]').textContent = two ? 'Quitar 2ª franja' : '+ 2ª franja';
-        syncRow(r);
+        [[1, t1], [2, t2]].forEach(([n, ts]) => { const b = r.querySelector(`.ftypes[data-fr="${n}"]`); b.querySelectorAll('.ft').forEach(x => { x.checked = ts.includes(x.value); }); syncTypes(b); });
+        syncSplit(r, two); syncRow(r);
       });
     }
     const sp = e.target.closest('[data-split]');
-    if (sp) { const box = sp.closest('.srow').querySelector('.s2'); box.hidden = !box.hidden; sp.textContent = box.hidden ? '+ 2ª franja' : 'Quitar 2ª franja'; }
+    if (sp) { const row = sp.closest('.srow'); syncSplit(row, row.querySelector('.s2').hidden); }
     if (e.target.closest('[data-pickphoto]')) choosePhoto(ph => { photoState = ph; f.querySelector('#phprev').innerHTML = avatarHTML({ photo: ph }, 64); });
     if (e.target.closest('[data-rmphoto]')) { photoState = ''; f.querySelector('#phprev').innerHTML = avatarHTML({}, 64); }
     if (e.target.closest('[data-cancel]')) opts.onCancel();
