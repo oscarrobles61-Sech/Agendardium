@@ -257,6 +257,8 @@ model user_schedules {
   to_hour    Int?     @db.SmallInt
   from_hour2 Int?     @db.SmallInt
   to_hour2   Int?     @db.SmallInt
+  session_types  String[]
+  session_types2 String[]
   extra      Json     @default("{}")
   users      users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
 

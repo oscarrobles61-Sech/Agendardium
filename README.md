@@ -25,7 +25,7 @@ Basadas en el `schema.sql` de referencia:
 | Tabla | Contenido |
 |---|---|
 | `app_config`, `holidays` | Configuración general y feriados cargados a mano |
-| `users`, `user_schedules` | Integrantes (con su `dni` en texto plano y sus `profiles`) y horario por día, con 2ª franja opcional (`from_hour2`/`to_hour2`) |
+| `users`, `user_schedules` | Integrantes (con su `dni` en texto plano y sus `profiles`) y horario por día, con 2ª franja opcional (`from_hour2`/`to_hour2`) y los tipos de sesión que admite cada franja (`session_types`/`session_types2`; vacío = todos) |
 | `patients`, `patient_professionals`, `patient_notes` | Pacientes, sus profesionales y notas tipo historia clínica |
 | `treatment_plans`, `plan_day_patterns` | Tratamientos (con su tipo de sesión) y su patrón de días/horas |
 | `agenda_weeks`, `sessions`, `agenda_blocks` | Semanas de agenda por profesional, cada turno y los bloqueos de "Cancelar agenda" |
@@ -107,6 +107,23 @@ se usan las de su profesión: por ejemplo Fonoaudiología o Nutrición; si tampo
 - **Práctica diferenciada**: cantidad de sesiones libre (hasta 999).
 
 Se guarda en `treatment_plans` (`session_type`, `specialty`, `training_frequency`, `practice`, `until_date`).
+
+### Tipos de sesión por franja
+
+En su horario, cada profesional marca qué tipos de sesión admite cada franja (por ejemplo, martes y jueves de 8 a 12
+solo Entrenamiento y de 14 a 20 solo Rehabilitación). Sin ninguno marcado, la franja admite todos (así quedan los
+horarios cargados antes de este cambio).
+
+- Con el filtro **Rol** de la secretaría, las franjas que no admiten el tipo de ese rol se ven grisadas con
+  "Solo …" y no se pueden tomar; el filtro **Hora** tampoco las cuenta como libres.
+- Al agendar, el tipo de sesión se propone según la franja tocada y solo se habilitan los días cuya franja lo admite.
+  Las continuaciones y las sesiones restantes respetan el tipo del tratamiento.
+- **Limpiar filtros** vacía Rol y Hora de una vez.
+
+### Borrar copias de seguridad
+
+En Ajustes → Copias de seguridad, cada copia tiene **Borrar**, y **Borrar las viejas** deja solo las 3 más recientes
+(pide confirmación; lo borrado no se recupera).
 
 ## Primera sesión, restantes y continuación
 
