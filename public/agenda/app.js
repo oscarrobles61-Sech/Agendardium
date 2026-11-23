@@ -520,7 +520,14 @@ const typesText = ts => ts.map(t => SESSION_TYPES[t] || t).join(', ');
 // Tipos de sesión de una especialidad (las propias del centro cuentan como rehabilitación).
 const specTypes = sp => { const t = Object.keys(SPECS_BY_TYPE).filter(k => SPECS_BY_TYPE[k].includes(sp)); return t.length ? t : ['rehabilitacion']; };
 // Tipos que busca la secretaría con el filtro de rol (null = sin filtro de tipo).
-const filterTypes = () => (isSec() && S.roleFilter && S.roleFilter !== '*' && !S.roleFilter.startsWith('__')) ? specTypes(S.roleFilter) : null;
+// Tipos que busca la secretaría con el filtro de rol (null = sin filtro de tipo): un tipo de sesión elegido directamente,
+// los de una especialidad, o los de un perfil que tiene especialidades propias (ej. Profesor/a de educación física → Entrenamiento).
+function filterTypes() {
+  const f = S.roleFilter; if (!isSec() || !f || f === '*' || f === '__med') return null;
+  if (f.startsWith('__t:')) return [f.slice(4)];
+  if (f.startsWith('__r:')) { const sp = ROLE_SPECS[f.slice(4)]; return sp ? [...new Set(sp.flatMap(specTypes))] : null; }
+  return specTypes(f);
+}
 const admitsSomewhere = (pro, types) => !types || S.cfg.days.some(d => { const sc = pro.schedule && pro.schedule[d]; return sc && sc.on && [sc.types || [], ...(sc.from2 != null ? [sc.types2 || []] : [])].some(ts => franjaOk({ types: ts }, types)); });
 
 function pipsHTML(n, cap, big) {
@@ -926,7 +933,7 @@ function capModal(h) {
 }
 
 /* ---- filtro de agendas (secretaría): rol con sugerencias y hora ---- */
-const roleOptions = () => [['*', 'Todos'], ['__med', 'Médicos'],
+const roleOptions = () => [['*', 'Todos'], ...Object.entries(SESSION_TYPES).map(([k, v]) => ['__t:' + k, v]), ['__med', 'Médicos'],
   ...['kinesiologo', 'profesor_ef', 'fonoaudiologo', 'terapista_ocupacional', 'nutricionista', 'psicologo'].map(r => ['__r:' + r, ROLE_LABEL[r]]),
   ...S.cfg.roles.map(r => [r, r])];
 const roleLabel = v => (roleOptions().find(([k]) => k === v) || [, ''])[1];
@@ -951,7 +958,7 @@ function bindSuggest(input, box, items, pick) {
   input.onfocus = () => { input.select(); show(); };
   input.oninput = show;
   input.onkeydown = e => {
-    if (e.key === 'Enter') { e.preventDefault(); const f = box.querySelector('[data-k]'); if (f) pick(f.dataset.k); }
+    if (e.key === 'Enter') { e.preventDefault(); const f = box.querySelector('[data-k]'); if (f) pick(f.dataset.k); else input.blur(); }
     if (e.key === 'Escape') { box.hidden = true; input.blur(); }
   };
   box.onmousedown = e => e.preventDefault(); // que no se pierda el foco antes del clic
@@ -962,7 +969,7 @@ function bindSuggest(input, box, items, pick) {
 function viewAgenda() {
   const sec = isSec();
   const allPros = Object.entries(S.users).filter(([, u]) => isPro(u));
-  let pros = allPros.filter(([, u]) => S.roleFilter === '*' || (S.roleFilter === '__med' ? isMed(u) : S.roleFilter.startsWith('__r:') ? hasRole(u, S.roleFilter.slice(4)) : proSpecs(u).includes(S.roleFilter) && admitsSomewhere(u, filterTypes()))).sort(byName);
+  let pros = allPros.filter(([, u]) => S.roleFilter === '*' || (S.roleFilter === '__med' ? isMed(u) : S.roleFilter.startsWith('__t:') ? !isMed(u) && admitsSomewhere(u, filterTypes()) : S.roleFilter.startsWith('__r:') ? hasRole(u, S.roleFilter.slice(4)) && admitsSomewhere(u, filterTypes()) : proSpecs(u).includes(S.roleFilter) && admitsSomewhere(u, filterTypes()))).sort(byName);
   // Con hora elegida: solo quienes atienden a esa hora, primero el que tiene menos pacientes (más lugar libre).
   const hf = sec && S.hourFilter != null ? S.hourFilter : null; const fr = {};
   if (hf != null) {
@@ -1018,7 +1025,15 @@ function viewAgenda() {
   const rf = $('#rf');
   if (rf) {
     bindSuggest(rf, $('#rfsug'), roleOptions, k => { S.roleFilter = k; S.proId = null; viewAgenda(); });
-    rf.addEventListener('change', () => { if (!rf.value.trim() && S.roleFilter !== '*') { S.roleFilter = '*'; S.proId = null; viewAgenda(); } });
+    rf.addEventListener('change', () => {
+      const v = rf.value.trim();
+      if (!v) { if (S.roleFilter !== '*') { S.roleFilter = '*'; S.proId = null; viewAgenda(); } return; }
+      if (S.roleFilter !== '*' && norm(v) === norm(roleLabel(S.roleFilter))) return;
+      // Texto escrito sin elegir de la lista: se usa si coincide con un rol; si no, se avisa en vez de dejar el filtro sin aplicar.
+      const hit = roleOptions().filter(([k]) => k !== '*').find(([, l]) => norm(l).includes(norm(v)));
+      if (hit) { S.roleFilter = hit[0]; S.proId = null; viewAgenda(); }
+      else { toast(`No hay ningún rol o tipo de sesión que coincida con "${v}". Elegilo de la lista.`); rf.value = S.roleFilter === '*' ? '' : roleLabel(S.roleFilter); }
+    });
     const hfi = $('#hf');
     const hours = () => [['', 'Cualquier hora'], ...Array.from({ length: S.cfg.close - S.cfg.open }, (_, i) => [String(S.cfg.open + i), `${S.cfg.open + i} h`])];
     bindSuggest(hfi, $('#hfsug'), hours, k => { S.hourFilter = k === '' ? null : +k; S.proId = null; viewAgenda(); });
@@ -1464,7 +1479,8 @@ function openSlot(date, h, d, m, eid) {
   if (f.stype) {
     const opts = [...f.stype.options]; const okOpt = o => works(pro, d, h, o.value.split('|')[0]);
     const want = isSec() && S.roleFilter && !S.roleFilter.startsWith('__') ? S.roleFilter : null;
-    const best = opts.find(o => okOpt(o) && want && o.value.split('|')[1] === want) || (f.stype.selectedOptions[0] && okOpt(f.stype.selectedOptions[0]) ? null : opts.find(okOpt));
+    const wantT = isSec() && S.roleFilter && S.roleFilter.startsWith('__t:') ? S.roleFilter.slice(4) : null;
+    const best = opts.find(o => okOpt(o) && ((want && o.value.split('|')[1] === want) || (wantT && o.value.split('|')[0] === wantT))) || (f.stype.selectedOptions[0] && okOpt(f.stype.selectedOptions[0]) ? null : opts.find(okOpt));
     if (best) f.stype.value = best.value;
   }
   renderDays([d]);
