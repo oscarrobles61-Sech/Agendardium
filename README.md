@@ -185,6 +185,20 @@ Cada semana de agenda tiene un número de revisión (`doc_revs`). Al guardar, la
 persona guardó esa misma semana en el medio, el servidor rechaza el cambio (409) en vez de pisar sus turnos, la vista
 se actualiza y aparece el aviso "Otra persona cambió esta agenda al mismo tiempo". Se vuelve a intentar y listo.
 
+## Usuarios en línea
+
+Arriba a la derecha se ve **cuántas personas más tienen la agenda abierta**; tocándolo aparece la lista con qué está
+haciendo cada una (mirando una agenda, en otra sección, inactiva o **agendando un turno**). Sirve para no encimarse:
+
+- El turno que otra persona tiene abierto se marca en **naranja** en la grilla («Laura está agendando…»).
+- Si abrís un turno que otra persona está cargando en ese mismo horario, el turno muestra un **aviso**.
+- Un profesional ve en qué sección están los demás, pero de las agendas solo ve lo que pasa en la suya.
+
+Viaja con el mismo sondeo de cambios que la agenda ya hace cada pocos segundos (`POST /api/db/versions`), así que no
+suma pedidos a Vercel ni horas de cómputo a Neon. Se guarda en la tabla `presence` (una fila por persona, sin datos
+de pacientes). Quien cierra la pestaña deja de figurar enseguida; si bloquea el teléfono, en 90 segundos como mucho.
+Más de 10 minutos sin tocar la pantalla: figura como inactivo/a.
+
 ## Límites de Vercel y Neon
 
 - La agenda consulta cambios cada 6 s mientras se usa, cada 20 s tras 2 minutos sin tocarla, cada 60 s tras 10

@@ -43,6 +43,25 @@
   const snapDoc = (id, data) => ({ id, exists: data != null, data: () => data });
   const snapQuery = docs => ({ docs: docs.map(d => ({ id: d.id, exists: true, data: () => d.data })), size: docs.length, empty: !docs.length });
 
+  /* ---------- usuarios en línea ---------- */
+  // pres.state(): qué está haciendo esta persona (lo arma app.js); pres.cb(lista): llega en cada sondeo.
+  const pres = { state: null, cb: null, device: (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ? 'tel' : 'pc', sent: '' };
+  function leave() {
+    if (!pres.state) return;
+    try {
+      const blob = new Blob([JSON.stringify({ leave: true })], { type: 'application/json' });
+      if (!(navigator.sendBeacon && navigator.sendBeacon('/api/db/versions', blob))) fetch('/api/db/versions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"leave":true}', keepalive: true }).catch(() => {});
+    } catch (e) {}
+  }
+  // Al cerrar la pestaña deja de figurar enseguida (si no llega, desaparece solo en 90 s).
+  window.addEventListener('pagehide', leave);
+  // Si cambió lo que hace (abrió un turno, cambió de agenda o de sección) se avisa sin esperar al próximo sondeo.
+  setInterval(() => {
+    if (!pres.state || !subs.size || document.visibilityState === 'hidden') return;
+    let cur = ''; try { cur = JSON.stringify(pres.state()); } catch (e) { return; }
+    if (cur !== pres.sent) { pres.sent = cur; tick(false); }
+  }, 1500);
+
   /* ---------- suscripciones (sondeo por versión de colección) ---------- */
   const subs = new Set();
   let versions = {}, timer = null, busy = false, again = false;
@@ -62,7 +81,14 @@
     busy = true;
     try {
       let v = versions;
-      try { v = await call('GET', '/api/db/versions'); } catch (e) {}
+      try {
+        if (pres.state) {
+          // Mismo pedido: versiones + señal de "estoy acá" + lista de quién más está en línea.
+          const r = await call('POST', '/api/db/versions', { p: pres.state(), idleMs: Date.now() - lastInput, device: pres.device });
+          v = r.versions || v;
+          if (r.online && pres.cb) { try { pres.cb(r.online); } catch (e) { console.error(e); } }
+        } else v = await call('GET', '/api/db/versions');
+      } catch (e) {}
       const changed = new Set(Object.keys(v).filter(c => v[c] !== versions[c]));
       versions = v;
       await Promise.all([...subs].filter(s => force || changed.has(s.col)).map(run));
@@ -163,7 +189,9 @@
     },
     // Avisos entre secretaría y profesionales (rutas /api/avisos y /api/push).
     api: (method, url, body) => call(method, url, body),
-    // Corta todas las suscripciones (al cerrar sesión).
-    stopAll() { subs.clear(); if (timer) { clearTimeout(timer); timer = null; } versions = {}; }
+    // Usuarios en línea: state() devuelve qué está haciendo esta persona; cb recibe la lista en cada sondeo.
+    presence(state, cb) { pres.state = state; pres.cb = cb; pres.sent = ''; if (subs.size) tick(false); },
+    // Corta todas las suscripciones (al cerrar sesión) y deja de figurar en línea.
+    stopAll() { leave(); pres.state = null; pres.cb = null; subs.clear(); if (timer) { clearTimeout(timer); timer = null; } versions = {}; }
   };
 })();

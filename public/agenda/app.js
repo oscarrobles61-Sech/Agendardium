@@ -546,6 +546,7 @@ function hourOpts(from, to, sel) {
 /* ================= modales ================= */
 function openModal(html) {
   $('#modal').innerHTML = `<div class="scrim" data-scrim><div class="sheet" role="dialog" aria-modal="true">${html}</div></div>`;
+  if (M) presModalWarn();
   const f = $('#modal input:not([type=checkbox]):not([disabled]), #modal select');
   if (f && window.matchMedia('(min-width:721px)').matches) f.focus();
 }
@@ -623,11 +624,12 @@ function render() {
   if (!unsubPat) unsubPat = Store.watchPatients(map => { S.patients = map; if (S.tab === 'patients') renderPatientList(); if (S.tab === 'home') renderReminders(); refreshSlot(); });
   renderView(false);
   startAvisos();
+  startPresence();
   usoAlert();
 }
 
 function logout(silent) {
-  stopAvisos();
+  stopAvisos(); stopPresence();
   S.me = null; S.sig = ''; S.tab = 'home'; S.proId = null; S.pruned = false; S.pins = null; S.uso = null; usoAlert.done = false;
   if (unsubAg) { unsubAg(); unsubAg = null; } agKey = '';
   stopBackupTimer();
@@ -843,6 +845,7 @@ function renderShell() {
     <header class="top">
       <div class="brand">${brandLogo()}<h1>${BRAND}<small>Agenda semanal</small></h1></div>
       <div class="who">
+        <span id="presbox"></span>
         <button class="ibtn" id="undo" aria-label="Deshacer mi última acción">${ico('undo', 18)}</button>
         <button class="ibtn" id="theme" title="Tema: ${themeLabel()}" aria-label="Tema: ${themeLabel()}. Tocá para cambiar">${ico(THEME === 'dark' ? 'moon' : THEME === 'light' ? 'sun' : 'auto', 18)}</button>
         <div class="usr"><div class="un"><b>${esc(me.name)}</b><small>${esc(roleText(me))}</small></div>${avatarHTML(me, 38)}</div>
@@ -858,6 +861,7 @@ function renderShell() {
   $('#undo').onclick = doUndo; refreshUndo();
   app.querySelectorAll('.tabs,.bnav').forEach(n => n.onclick = e => { const b = e.target.closest('[data-tab]'); if (b) goTab(b.dataset.tab); });
   if (AV.unread > 0) setAvBadge(AV.unread);
+  renderPresPill();
 }
 
 // Botón "Deshacer": cada persona deshace solo su última acción; lo que hicieron los demás queda como está.
@@ -1232,6 +1236,7 @@ function renderGrid() {
   };
   g.onkeydown = e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('ln')) { e.preventDefault(); e.target.click(); } };
   sum.textContent = `${total} ${total === 1 ? 'paciente cargado' : 'pacientes cargados'} esta semana${totalSob ? ' (' + totalSob + ' en sobreturno)' : ''}. Tocá una línea para cargar o ver un paciente y el círculo para marcar asistencia. Para reagendar, arrastrá el nombre a otro turno (en el celular, mantenelo apretado un momento).`;
+  presMarkGrid();
 }
 
 async function cycleMark(date, h, m, eid) {
@@ -3602,7 +3607,7 @@ async function renderUso() {
   const u = await fetchUso(); if (!$('#usobox')) return;
   if (!u) { box.innerHTML = '<h2>Uso de la base</h2><p class="hint">No se pudo leer el uso.</p>'; return; }
   box.innerHTML = `<h2>Uso de la base (Neon)</h2>
-    <p class="hint">Límites del plan gratuito. Si se pasa el espacio, la agenda deja de guardar; si se terminan las horas de cómputo, la base se apaga hasta el mes siguiente.</p>
+    <p class="hint">Límites del plan gratuito. Si se pasa el espacio, la agenda deja de guardar; si se terminan las horas de cómputo o la transferencia, la base se apaga hasta el mes siguiente.</p>
     ${usoRows(u).map(r => `<div class="fld"><span>${esc(r.label)}: ${numFmt(r.v)} de ${numFmt(r.max)} ${r.unit} (${Math.round(r.pct * 100)}%)</span>
       <div style="height:10px;border-radius:99px;background:var(--soft);overflow:hidden"><div style="height:100%;width:${Math.min(100, Math.round(r.pct * 100))}%;background:${r.pct >= USO_WARN ? 'var(--danger, #c0392b)' : 'var(--brand)'}"></div></div></div>`).join('')}
     ${u.cuHours == null ? `<p class="hint">${esc(u.apiError || 'Para ver también las horas de cómputo y la transferencia del mes, cargá NEON_API_KEY y NEON_PROJECT_ID en Vercel.')}</p>` : ''}`;
@@ -3615,6 +3620,122 @@ async function usoAlert() {
   const hot = usoRows(u).filter(r => r.pct >= USO_WARN);
   if (hot.length) toast(`Atención: ${hot.map(r => `${r.label.toLowerCase()} al ${Math.round(r.pct * 100)}%`).join(' y ')} del límite de Neon. Mirá Ajustes.`);
 }
+
+/* ================= usuarios en línea ================= */
+// Quién más tiene la agenda abierta y qué está haciendo, para no encimarse al agendar. Viaja con el mismo sondeo
+// de cambios (ver neon-db.js y /api/db/versions): no suma pedidos ni horas de Neon. Solo con base de datos.
+// - Contador y lista en la barra de arriba (en el teléfono, hoja desde abajo).
+// - El turno que otra persona tiene abierto se marca en naranja en la grilla.
+// - Si abrís un turno que otra persona tiene abierto, el turno muestra un aviso.
+const PRES = { list: [], open: false };
+const PRES_IDLE_S = 600;                  // más de 10 minutos sin tocar nada: "inactivo"
+const PRES_COLORS = ['#7B61C9', '#0A8F7A', '#D0587E', '#C27C0E', '#2F7FC1', '#5C8A1E', '#B5523B', '#6B6FD6'];
+const presColor = id => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PRES_COLORS[h % PRES_COLORS.length]; };
+const presIni = u => { const w = String((u && u.name) || '?').trim().split(/\s+/); return ((w[0] || '?')[0] + (w.length > 1 ? w[w.length - 1][0] : '')).toUpperCase(); };
+const presOthers = () => PRES.list.filter(p => p.id !== S.me && S.users[p.id]);
+const presKind = p => p.state && p.state.ed && p.state.ed.add ? 'busy' : p.idle > PRES_IDLE_S ? 'idle' : '';
+function presAv(p, size) {
+  const u = S.users[p.id] || {}; const k = presKind(p);
+  const inner = u.photo && PHOTO_OK.test(u.photo) ? `<img src="${u.photo}" alt="">` : esc(size < 34 ? presIni(u)[0] : presIni(u));
+  return `<span class="pav ${k}" style="--pav:${size}px;background:${presColor(p.id)}">${inner}</span>`;
+}
+function presState() {
+  const st = { tab: S.tab };
+  if (S.tab === 'agenda' && S.proId) { st.proId = S.proId; st.week = S.week; }
+  if (M && M.proId && M.date != null && M.h != null) st.ed = { proId: M.proId, date: M.date, h: M.h, m: M.m, eid: M.eid || null, add: !M.eid && canEditAgenda(M.proId) };
+  return st;
+}
+const presAgo = s => s < 15 ? 'ahora' : s < 60 ? `hace ${s} s` : s < 3600 ? `hace ${Math.round(s / 60)} min` : `hace ${Math.round(s / 3600)} h`;
+const presProName = (proId, who) => proId === who ? 'su agenda' : proId === S.me ? 'tu agenda' : S.users[proId] ? 'la agenda de ' + S.users[proId].name : 'una agenda';
+function presSlotText(ed) {
+  const dt = parse(ed.date);
+  const pro = ed.proId === S.me ? 'tu agenda' : (S.users[ed.proId] || {}).name || 'otra agenda';
+  return `${pro} · ${DAYS_S[dt.getDay()].toLowerCase()} ${dt.getDate()}, ${ed.m != null ? tm(ed.h, ed.m) : ed.h + ' h'}`;
+}
+const PRES_TABS = { home: 'En Inicio', month: 'En Registro', patients: 'En Pacientes', avisos: 'En Avisos', team: 'En Equipo', config: 'En Ajustes', profile: 'En su perfil', agenda: 'En la agenda' };
+function presWhat(p) {
+  const st = p.state || {};
+  if (p.idle > PRES_IDLE_S) return { cls: 'idle', t: 'Inactivo/a (tiene la agenda abierta, sin tocar)' };
+  if (st.ed) return { cls: st.ed.add ? 'busy' : '', t: `${st.ed.add ? '✎ Agendando un turno' : 'Mirando un turno'}: ${presSlotText(st.ed)}` };
+  if (st.tab === 'agenda' && st.proId) {
+    const m = parse(st.week || S.week), e = addDays(m, 6);
+    return { cls: '', t: `Mirando ${presProName(st.proId, p.id)} · semana ${m.getDate()}${m.getMonth() !== e.getMonth() ? ' ' + MONTHS_S[m.getMonth()] : ''} – ${e.getDate()} ${MONTHS_S[e.getMonth()]}` };
+  }
+  return { cls: '', t: PRES_TABS[st.tab] || 'Con la agenda abierta' };
+}
+function presWhen(p) {
+  const dev = p.device === 'tel' ? 'teléfono' : 'PC';
+  return (p.idle > PRES_IDLE_S ? `Última acción ${presAgo(p.idle)}` : p.idle < 15 ? 'Activo/a ahora' : `Activo/a ${presAgo(p.idle)}`) + ' · ' + dev;
+}
+function renderPresPill() {
+  const box = $('#presbox'); if (!box) return;
+  if (Store.mode !== 'db') { box.innerHTML = ''; return; }
+  const o = presOthers(); const busy = o.filter(p => presKind(p) === 'busy').length;
+  const shown = o.slice(0, 4), shownM = o.slice(0, 2);
+  const label = o.length ? `${o.length} en línea` : 'Solo vos';
+  box.innerHTML = `<button class="pres${o.length ? '' : ' alone'}" id="pres" aria-haspopup="dialog" aria-expanded="${PRES.open}" title="Quién más tiene la agenda abierta" aria-label="${o.length ? o.length + (o.length === 1 ? ' persona más' : ' personas más') + ' en línea' : 'Nadie más en línea'}. Tocá para ver la lista">
+    ${o.length ? `<span class="stk pd">${shown.map(p => presAv(p, 30)).join('')}</span><span class="stk pm">${shownM.map(p => presAv(p, 28)).join('')}</span>` : ico('users', 18)}
+    <span class="ptx pd"><b>${label}</b>${busy ? `<small>${busy} agendando</small>` : ''}</span>
+    ${o.length > 2 ? `<b class="pm pmore">+${o.length - 2}</b>` : ''}</button>`;
+  $('#pres').onclick = e => { e.stopPropagation(); PRES.open = !PRES.open; renderPresPanel(); };
+}
+function renderPresPanel() {
+  let pop = $('#prespop');
+  if (!PRES.open || !$('#pres')) { if (pop) pop.remove(); const b = $('#pres'); if (b) b.setAttribute('aria-expanded', 'false'); return; }
+  if (!pop) { pop = document.createElement('div'); pop.id = 'prespop'; document.body.appendChild(pop); pop.addEventListener('click', e => { if (e.target.matches('[data-presclose]')) { PRES.open = false; renderPresPanel(); } }); }
+  $('#pres').setAttribute('aria-expanded', 'true');
+  const o = presOthers().sort((a, b) => (presKind(a) === 'busy' ? 0 : presKind(a) === 'idle' ? 2 : 1) - (presKind(b) === 'busy' ? 0 : presKind(b) === 'idle' ? 2 : 1) || (S.users[a.id].name || '').localeCompare(S.users[b.id].name || '', 'es'));
+  const me = S.users[S.me] || {};
+  const rows = o.map(p => { const w = presWhat(p); const u = S.users[p.id]; return `<div class="prow">${presAv(p, 38)}<div class="t"><b>${esc(u.name || '')}</b><span class="r">${esc(roleText(u))}</span><div class="what ${w.cls}">${esc(w.t)}</div><div class="when">${esc(presWhen(p))}</div></div></div>`; }).join('');
+  const r = $('#pres').getBoundingClientRect();
+  const desk = window.matchMedia('(min-width:721px)').matches;
+  pop.innerHTML = `${desk ? '' : '<div class="scrim2" data-presclose></div>'}<div class="ppanel${desk ? '' : ' sheetp'}" role="dialog" aria-label="En línea ahora" ${desk ? `style="top:${Math.round(r.bottom + window.scrollY + 8)}px;left:${Math.max(8, Math.round(r.right - 380))}px"` : ''}>
+    ${desk ? '' : '<div class="grab"></div>'}<h3>En línea ahora</h3>
+    <p class="psub">${o.length ? `Vos (${esc(me.name || '')}) y ${o.length === 1 ? '1 persona más tienen' : o.length + ' personas más tienen'} la agenda abierta.` : 'Nadie más tiene la agenda abierta en este momento.'}</p>
+    ${rows}
+    <p class="pnote">Se actualiza solo cada pocos segundos. Quien cierra la agenda o bloquea el teléfono deja de figurar en 1 minuto y medio como mucho.</p>
+    ${desk ? '' : '<button class="btn ghost" data-presclose style="width:100%;margin-top:6px">Cerrar</button>'}</div>`;
+}
+document.addEventListener('click', e => { if (PRES.open && !e.target.closest('#prespop .ppanel') && !e.target.closest('#pres')) { PRES.open = false; renderPresPanel(); } });
+window.addEventListener('resize', () => { if (PRES.open) renderPresPanel(); });
+// Turnos que otras personas tienen abiertos en la agenda que estoy mirando.
+function presMarkGrid() {
+  const g = $('#grid'); if (!g) return;
+  g.querySelectorAll('.plock').forEach(x => { x.classList.remove('plock'); const l = x.querySelector('.plockt'); if (l) l.remove(); });
+  for (const p of presOthers()) {
+    const ed = p.state && p.state.ed; if (!ed || ed.proId !== S.proId || mondayKey(ed.date) !== S.week) continue;
+    const sel = `.ln[data-date="${ed.date}"][data-h="${ed.h}"]${ed.m != null ? `[data-m="${ed.m}"]` : ''}`;
+    let ln = ed.eid ? g.querySelector(`${sel}[data-eid="${CSS.escape(ed.eid)}"]`) : null;
+    if (!ln && ed.add) ln = g.querySelector(`${sel}.empty`) || g.querySelector(`${sel}.draft`);
+    if (!ln || ln.classList.contains('plock')) continue;
+    const u = S.users[p.id];
+    ln.classList.add('plock'); if (ed.add) ln.classList.add('padd');
+    ln.title = `${u.name} ${ed.add ? 'está agendando en este horario' : 'tiene abierto este turno'}`;
+    ln.insertAdjacentHTML('afterbegin', `<span class="plockt"><i style="background:${presColor(p.id)}">${esc(presIni(u)[0])}</i>${ed.add ? esc(u.name.split(' ')[0]) + ' está agendando…' : ''}</span>`);
+  }
+}
+// Aviso dentro del turno abierto si otra persona tiene abierto el mismo horario.
+function presModalWarn() {
+  const sh = $('#modal .sheet'); const old = $('#preswarn');
+  if (!sh || !M || M.date == null) { if (old) old.remove(); return; }
+  const same = presOthers().filter(p => { const ed = p.state && p.state.ed; return ed && ed.proId === M.proId && ed.date === M.date && ed.h === M.h && (ed.m ?? null) === (M.m ?? null) && (ed.add || (M.eid && ed.eid === M.eid)); });
+  if (!same.length) { if (old) old.remove(); return; }
+  const p = same[0], u = S.users[p.id], n = u.name.split(' ')[0];
+  const html = `<div class="pwarn" id="preswarn" role="status">${presAv(p, 30)}<div><b>${esc(u.name)} ${p.state.ed.add ? 'está agendando en este mismo horario' : 'tiene abierto este mismo turno'}${same.length > 1 ? ` (y ${same.length - 1} más)` : ''}</b>Si guardan las dos personas a la vez, la agenda acepta el primero y al segundo le avisa que vuelva a intentar. Coordiná con ${esc(n)} antes de guardar.</div></div>`;
+  if (old) { old.outerHTML = html; return; }
+  const sub = sh.querySelector('.sub'); if (sub) sub.insertAdjacentHTML('afterend', html); else sh.insertAdjacentHTML('afterbegin', html);
+}
+function onPresence(list) {
+  PRES.list = Array.isArray(list) ? list : [];
+  renderPresPill(); if (PRES.open) renderPresPanel();
+  if (S.tab === 'agenda') presMarkGrid();
+  presModalWarn();
+}
+function startPresence() {
+  if (Store.mode !== 'db' || !window.NeonDB || startPresence.on) return;
+  startPresence.on = true; window.NeonDB.presence(presState, onPresence);
+}
+function stopPresence() { startPresence.on = false; PRES.list = []; PRES.open = false; renderPresPanel(); }
 
 /* ================= avisos entre secretaría y profesionales (push) ================= */
 // Secretaría le manda avisos a un profesional; un profesional se los manda a toda la secretaría.
